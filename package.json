@@ -38,7 +38,9 @@
     "register:claude": "node scripts/register-claude.mjs",
     "register:plugin": "node scripts/register-plugin.mjs",
     "install:plugin": "node scripts/register-plugin.mjs",
-    "dashboard": "node scripts/dashboard.mjs"
+    "dashboard": "node scripts/dashboard.mjs",
+    "clean": "node scripts/clean-runs.mjs",
+    "prune": "node scripts/clean-runs.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.3.0",

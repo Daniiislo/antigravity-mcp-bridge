@@ -36,8 +36,10 @@ try {
     "agy_status",
     "agy_stop",
     "cancel_task",
+    "clean_history",
     "close_worker",
     "create_worker",
+    "delete_task",
     "dispatch_task",
     "inspect_task",
     "list_models",
@@ -129,7 +131,16 @@ try {
     throw new Error(`open_dashboard failed: ${JSON.stringify(dashRes)}`);
   }
 
-  process.stdout.write("MCP smoke test passed: all 15 tools verified, async worker lifecycle (create/dispatch/wait/inspect/close), open_dashboard, and compatibility delegation completed.\n");
+  // 6. Delete task: delete_task
+  const delRes = await client.callTool({
+    name: "delete_task",
+    arguments: { job_id: jobId }
+  });
+  if (delRes.isError || !delRes.structuredContent?.success) {
+    throw new Error(`delete_task failed: ${JSON.stringify(delRes)}`);
+  }
+
+  process.stdout.write("MCP smoke test passed: all 17 tools verified, async worker lifecycle (create/dispatch/wait/inspect/close), open_dashboard, and delete_task completed.\n");
 } finally {
   await client.close();
 }

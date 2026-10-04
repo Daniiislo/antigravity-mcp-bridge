@@ -1,5 +1,5 @@
 import EventEmitter from "node:events";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { normalizeDeniedAction, type AgyUsage } from "./agy-protocol.js";
 
@@ -62,6 +62,22 @@ export interface RecordEventInput {
 export interface EventStoreOptions {
   runsDir: string;
   maxFieldBytes?: number | undefined;
+}
+
+export interface CleanJobsOptions {
+  all?: boolean | undefined;
+  jobId?: string | undefined;
+  workspace?: string | undefined;
+  status?: string | string[] | undefined;
+  terminalOnly?: boolean | undefined;
+  olderThanDays?: number | undefined;
+  keep?: number | undefined;
+  excludeJobIds?: string[] | undefined;
+}
+
+export interface CleanJobsResult {
+  deletedCount: number;
+  deletedJobIds: string[];
 }
 
 export interface JobHistorySummary {
@@ -284,6 +300,89 @@ export class EventStore extends EventEmitter {
 
     const limit = filter?.limit ?? 20;
     return filtered.slice(0, limit);
+  }
+
+  deleteJob(jobId: string): boolean {
+    if (!jobId || typeof jobId !== "string" || !/^[a-zA-Z0-9_-]+$/.test(jobId)) {
+      throw new Error(`Invalid job ID for deletion: ${jobId}`);
+    }
+    const resolvedDir = path.resolve(this.runsDir);
+    const targetPath = path.resolve(resolvedDir, `${jobId}.ndjson`);
+    if (!targetPath.startsWith(resolvedDir)) {
+      throw new Error(`Access denied: job path outside runs directory`);
+    }
+
+    let deleted = false;
+    if (existsSync(targetPath)) {
+      unlinkSync(targetPath);
+      deleted = true;
+    }
+
+    // Purge in-memory events for this job
+    for (let i = this.events.length - 1; i >= 0; i--) {
+      if (this.events[i]?.jobId === jobId) {
+        this.events.splice(i, 1);
+      }
+    }
+    return deleted;
+  }
+
+  async cleanJobs(options: CleanJobsOptions = {}): Promise<CleanJobsResult> {
+    const allSummaries = await this.readDiskHistory({ limit: 100_000 });
+    const excludeSet = new Set(options.excludeJobIds || []);
+
+    let candidates: JobHistorySummary[] = allSummaries.filter((s: JobHistorySummary) => !excludeSet.has(s.job_id));
+
+    if (options.jobId) {
+      candidates = candidates.filter((s: JobHistorySummary) => s.job_id === options.jobId);
+    }
+
+    if (options.workspace) {
+      const targetWs = options.workspace.trim().toLowerCase();
+      candidates = candidates.filter((s: JobHistorySummary) => {
+        if (!s.workspace) return false;
+        const norm = s.workspace.toLowerCase();
+        return (
+          norm === targetWs ||
+          path.basename(s.workspace).toLowerCase() === targetWs ||
+          norm.includes(targetWs)
+        );
+      });
+    }
+
+    if (options.terminalOnly) {
+      candidates = candidates.filter((s: JobHistorySummary) => ["succeeded", "failed", "canceled"].includes(s.status));
+    }
+
+    if (options.status) {
+      const allowedStatuses = Array.isArray(options.status) ? options.status : [options.status];
+      candidates = candidates.filter((s: JobHistorySummary) => allowedStatuses.includes(s.status));
+    }
+
+    if (typeof options.olderThanDays === "number" && options.olderThanDays >= 0) {
+      const cutoffMs = Date.now() - options.olderThanDays * 86_400_000;
+      candidates = candidates.filter((s: JobHistorySummary) => new Date(s.created_at).getTime() < cutoffMs);
+    }
+
+    // Sort newest first
+    candidates.sort((a: JobHistorySummary, b: JobHistorySummary) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+    // If keep is specified, preserve the newest N candidates
+    if (typeof options.keep === "number" && options.keep > 0) {
+      candidates = candidates.slice(options.keep);
+    }
+
+    const deletedJobIds: string[] = [];
+    for (const item of candidates) {
+      if (this.deleteJob(item.job_id)) {
+        deletedJobIds.push(item.job_id);
+      }
+    }
+
+    return {
+      deletedCount: deletedJobIds.length,
+      deletedJobIds
+    };
   }
 
   readDiskJob(

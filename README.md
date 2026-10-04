@@ -125,7 +125,9 @@ create_worker → dispatch_task → wait_task (wait until terminal)
 | `cancel_task` | Cancel queued or active work. |
 | `close_worker` | Stop and close a worker. |
 | `agy_history` | Read persisted task summaries after server restarts. |
-| `open_dashboard` | Get the local read-only dashboard URL to inspect workers, jobs, conversations, and events. |
+| `open_dashboard` | Get the local dashboard URL to inspect workers, jobs, conversations, and events. |
+| `delete_task` | Delete an individual completed task run and its NDJSON log from disk. |
+| `clean_history` | Prune or clean historical task runs by project, status, age, or retention limit. |
 
 Four compatibility tools remain available: `agy_delegate`, `agy_status`, `agy_stop`, and `agy_reset`.
 
@@ -137,9 +139,9 @@ To prevent excessive prompt token consumption in coordinating agents (such as Co
 - **Inspect once on completion:** Call `inspect_task(job_id)` only after `wait_task` reports `terminal: true`.
 - **Use the Web Dashboard for real-time monitoring:** Call `open_dashboard` to inspect live progress, tool calls, and logs in the local web interface without streaming raw JSON events into the LLM context window.
 
-### Local Web Dashboard
+### Local Web Dashboard & Project Filtering
 
-The bridge includes an embedded, read-only local dashboard served over loopback HTTP (`127.0.0.1`):
+The bridge includes an embedded local dashboard served over loopback HTTP (`127.0.0.1`):
 
 #### How to Open:
 1. **Via Codex / Claude (During MCP Session):**
@@ -152,12 +154,39 @@ The bridge includes an embedded, read-only local dashboard served over loopback 
    ```
    This starts the local dashboard server, prints the URL, and opens it directly in your default browser to inspect historical runs (`.antigravity-bridge/runs`).
 
-- **Lazy start:** Starts on-demand on an ephemeral or configured port when `open_dashboard` is called or when workers/tasks are created.
-- **Strict loopback & Bearer token:** Bound strictly to `127.0.0.1`, protected by a per-process 48-character hex token in the URL path, and validates `Host` headers to protect against DNS rebinding.
-- **Read-only invariant:** Accepts only `GET` and `HEAD` requests; rejects mutations with `405 Method Not Allowed`.
-- **Self-contained & Safe:** Zero external CDNs, fonts, or remote assets. Enforces a strict Content Security Policy and renders all content using safe DOM text APIs (no untrusted `innerHTML`).
+#### Dashboard Capabilities:
+- **Project Filter:** Filter runs by project/workspace via dropdown or URL query parameter (`?project=<name>`).
+- **Dense layout:** Split-pane layout with Conversation view (prompts and assistant responses), Activity timeline (steps, tool calls, commands, stderr), and Raw event logs.
+- **Interactive Cleanup & Deletion:**
+  - **Single Job Deletion:** Click the `🗑️ Delete` button in the job detail header.
+  - **Prune History Modal:** Click the `🧹 Clean History` button in the sidebar to delete finished jobs, clean by project, delete failed jobs, or reset all history with optional retention (`keep newest N jobs`).
 - **Live SSE streaming:** Delivers real-time lifecycle and step events with reconnect cursor deduplication and polling fallback.
-- **Dense layout:** Split-pane layout optimized for Codex side panel or browser tabs, featuring Conversation view, Activity timeline, and Raw event logs.
+- **Strict loopback & Bearer token:** Bound strictly to `127.0.0.1`, protected by a per-process 48-character hex token in the URL path, and validates `Host` headers to protect against DNS rebinding.
+- **Self-contained & Safe:** Zero external CDNs, fonts, or remote assets. Enforces a strict Content Security Policy and renders all content using safe DOM text APIs (no untrusted `innerHTML`).
+
+### History Cleanup & Pruning CLI
+
+Clean or prune `.antigravity-bridge/runs` history from your terminal at any time:
+
+```bash
+# Preview candidates without deleting (safe dry-run)
+npm run clean -- --dry-run
+
+# Delete completed/terminal jobs while keeping the 10 newest runs
+npm run clean -- --terminal-only --keep 10
+
+# Delete all runs belonging to a specific workspace or project
+npm run clean -- --project "Antigravity Bridge Codex MCP"
+
+# Delete only failed and canceled runs
+npm run clean -- --status failed,canceled
+
+# Delete a single specific job
+npm run clean -- --job job-1791125238054-1
+
+# Delete all history (with confirmation prompt, or pass -y to skip)
+npm run clean -- --all -y
+```
 
 ## Configuration
 

@@ -1,5 +1,5 @@
 import http from "node:http";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,7 +34,7 @@ function makeManager(overrides: Partial<BridgeConfig> = {}) {
   };
   const mgr = new WorkerManager(config, [fixture], { runsDir });
   managers.push(mgr);
-  return { mgr, runsDir };
+  return { mgr, runsDir, es: (mgr as any).eventStore };
 }
 
 afterEach(async () => {
@@ -270,8 +270,8 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
       expect(headRes.body).toBe("");
       expect(headRes.headers["content-type"]).toContain("text/html");
 
-      // Mutation methods return 405 with Allow header
-      for (const m of ["POST", "PUT", "DELETE", "PATCH"]) {
+      // Mutation methods on read-only endpoints return 405 with Allow: GET, HEAD
+      for (const m of ["POST", "DELETE"]) {
         const res = await request({
           port,
           path: `/${ds.token}/api/snapshot`,
@@ -280,6 +280,19 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
         });
         expect(res.statusCode).toBe(405);
         expect(res.headers["allow"]).toBe("GET, HEAD");
+        expect(JSON.parse(res.body).error).toBe("Method not allowed");
+      }
+
+      // Unsupported global HTTP methods return 405 with global Allow list
+      for (const m of ["PUT", "PATCH"]) {
+        const res = await request({
+          port,
+          path: `/${ds.token}/api/snapshot`,
+          method: m,
+          body: JSON.stringify({ malicious: true })
+        });
+        expect(res.statusCode).toBe(405);
+        expect(res.headers["allow"]).toBe("GET, HEAD, POST, DELETE");
         expect(JSON.parse(res.body).error).toBe("Method not allowed");
       }
     });
@@ -863,6 +876,179 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
 
         // Server should never have started
         expect(mgr.getDashboardServer()).toBeUndefined();
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    });
+  });
+
+  describe("Job Deletion & History Cleanup Endpoints", () => {
+    it("deletes a completed job via DELETE /api/jobs/:id and purges disk & memory", async () => {
+      const { mgr, es, runsDir } = makeManager();
+      await mgr.getDashboardUrl();
+      const ds = mgr.getDashboardServer()!;
+      const port = ds.getPort()!;
+
+      // Record a completed job
+      const jobId = "job-del-test-1";
+      es.recordEvent({
+        eventType: "lifecycle",
+        workerId: "w-1",
+        jobId,
+        data: { lifecycle: "queued", brief: "test task" }
+      });
+      es.recordEvent({
+        eventType: "lifecycle",
+        workerId: "w-1",
+        jobId,
+        data: { lifecycle: "succeeded", response: "all good" }
+      });
+
+      expect(existsSync(path.join(runsDir, `${jobId}.ndjson`))).toBe(true);
+
+      const res = await request({
+        port,
+        path: `/${ds.token}/api/jobs/${jobId}`,
+        method: "DELETE"
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.success).toBe(true);
+      expect(body.jobId).toBe(jobId);
+      expect(existsSync(path.join(runsDir, `${jobId}.ndjson`))).toBe(false);
+    });
+
+    it("rejects deletion with 400 when job ID contains path traversal or invalid characters", async () => {
+      const { mgr } = makeManager();
+      await mgr.getDashboardUrl();
+      const ds = mgr.getDashboardServer()!;
+      const port = ds.getPort()!;
+
+      const res = await request({
+        port,
+        path: `/${ds.token}/api/jobs/..%2F..%2Fetc%2Fpasswd`,
+        method: "DELETE"
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toContain("Invalid job ID");
+    });
+
+    it("returns 404 when deleting a nonexistent job", async () => {
+      const { mgr } = makeManager();
+      await mgr.getDashboardUrl();
+      const ds = mgr.getDashboardServer()!;
+      const port = ds.getPort()!;
+
+      const res = await request({
+        port,
+        path: `/${ds.token}/api/jobs/job-does-not-exist-999`,
+        method: "DELETE"
+      });
+
+      expect(res.statusCode).toBe(404);
+      expect(JSON.parse(res.body).error).toContain("not found");
+    });
+
+    it("prunes runs via POST /api/clean with workspace filter, retention keep, and terminalOnly", async () => {
+      const { mgr, es, runsDir } = makeManager();
+      await mgr.getDashboardUrl();
+      const ds = mgr.getDashboardServer()!;
+      const port = ds.getPort()!;
+
+      // Create 3 runs in Project A and 1 run in Project B
+      const makeJob = (id: string, ws: string, status: string, tsOffset: number) => {
+        const file = path.join(runsDir, `${id}.ndjson`);
+        const createdIso = new Date(Date.now() - tsOffset).toISOString();
+        const content = [
+          JSON.stringify({ cursor: 1, timestamp: createdIso, eventType: "lifecycle", workerId: "w1", jobId: id, data: { lifecycle: "queued", workspace: ws, brief: id } }),
+          JSON.stringify({ cursor: 2, timestamp: createdIso, eventType: "lifecycle", workerId: "w1", jobId: id, data: { lifecycle: status, workspace: ws } })
+        ].join("\n");
+        writeFileSync(file, content, "utf8");
+      };
+
+      makeJob("proj-a-1", "F:/ProjectA", "succeeded", 3000);
+      makeJob("proj-a-2", "F:/ProjectA", "succeeded", 2000);
+      makeJob("proj-a-3", "F:/ProjectA", "succeeded", 1000);
+      makeJob("proj-b-1", "F:/ProjectB", "succeeded", 1000);
+
+      // Clean Project A, keeping newest 1
+      const res = await request({
+        port,
+        path: `/${ds.token}/api/clean`,
+        method: "POST",
+        body: JSON.stringify({
+          workspace: "ProjectA",
+          keep: 1,
+          terminalOnly: true
+        })
+      });
+
+      expect(res.statusCode).toBe(200);
+      const data = JSON.parse(res.body);
+      expect(data.deletedCount).toBe(2);
+      expect(data.deletedJobIds).toContain("proj-a-1");
+      expect(data.deletedJobIds).toContain("proj-a-2");
+      expect(existsSync(path.join(runsDir, "proj-a-3.ndjson"))).toBe(true);
+      expect(existsSync(path.join(runsDir, "proj-b-1.ndjson"))).toBe(true);
+    });
+
+    it("MCP tools delete_task and clean_history work as expected", async () => {
+      const { mgr, es, runsDir } = makeManager();
+      const server = createServer(mgr);
+      const [t1, t2] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "test-client", version: "1.0.0" });
+
+      await server.connect(t1);
+      await client.connect(t2);
+
+      try {
+        const jobId = "job-mcp-clean-1";
+        const file = path.join(runsDir, `${jobId}.ndjson`);
+        writeFileSync(file, JSON.stringify({
+          cursor: 1,
+          timestamp: new Date().toISOString(),
+          eventType: "lifecycle",
+          workerId: "w1",
+          jobId,
+          data: { lifecycle: "succeeded", brief: "mcp test" }
+        }) + "\n", "utf8");
+
+        expect(existsSync(file)).toBe(true);
+
+        const delRes = await client.callTool({
+          name: "delete_task",
+          arguments: { job_id: jobId }
+        });
+
+        expect(delRes.isError).toBeFalsy();
+        const delSc = delRes.structuredContent as any;
+        expect(delSc.jobId).toBe(jobId);
+        expect(delSc.success).toBe(true);
+        expect(existsSync(file)).toBe(false);
+
+        // Test clean_history
+        const j2 = "job-mcp-clean-2";
+        writeFileSync(path.join(runsDir, `${j2}.ndjson`), JSON.stringify({
+          cursor: 1,
+          timestamp: new Date().toISOString(),
+          eventType: "lifecycle",
+          workerId: "w1",
+          jobId: j2,
+          data: { lifecycle: "failed" }
+        }) + "\n", "utf8");
+
+        const cleanRes = await client.callTool({
+          name: "clean_history",
+          arguments: { status: "failed" }
+        });
+
+        expect(cleanRes.isError).toBeFalsy();
+        const cleanSc = cleanRes.structuredContent as any;
+        expect(cleanSc.deletedCount).toBe(1);
+        expect(cleanSc.deletedJobIds).toContain(j2);
       } finally {
         await client.close();
         await server.close();

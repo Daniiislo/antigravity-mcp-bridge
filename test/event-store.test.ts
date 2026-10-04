@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -177,5 +177,93 @@ describe("EventStore", () => {
     expect(diskJob!.duration_seconds).toBe(1.2);
 
     expect(store2.readDiskJob("nonexistent-job")).toBeUndefined();
+  });
+
+  it("deleteJob deletes run file from disk, purges memory events, and rejects traversal", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "event-store-"));
+    created.push(dir);
+    const store = new EventStore({ runsDir: dir });
+
+    const j1 = "job-del-1";
+    store.recordEvent({ eventType: "lifecycle", workerId: "w1", jobId: j1, data: { status: "queued" } });
+    store.recordEvent({ eventType: "lifecycle", workerId: "w1", jobId: "other-job", data: { status: "queued" } });
+
+    const filePath = path.join(dir, `${j1}.ndjson`);
+    expect(existsSync(filePath)).toBe(true);
+
+    const deleted = store.deleteJob(j1);
+    expect(deleted).toBe(true);
+    expect(existsSync(filePath)).toBe(false);
+
+    // In-memory events purged for j1
+    const remaining = store.getEvents({ jobId: j1 });
+    expect(remaining.events.length).toBe(0);
+
+    // Other jobs intact
+    const other = store.getEvents({ jobId: "other-job" });
+    expect(other.events.length).toBe(1);
+
+    // Path traversal rejection
+    expect(() => store.deleteJob("../outside")).toThrow(/Invalid job ID/);
+    expect(() => store.deleteJob("job/nested")).toThrow(/Invalid job ID/);
+  });
+
+  it("cleanJobs filters by workspace, status, olderThanDays, and respects keep retention", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "event-store-"));
+    created.push(dir);
+    const store = new EventStore({ runsDir: dir });
+
+    const makeRun = (id: string, ws: string, status: string, ageMs: number) => {
+      const f = path.join(dir, `${id}.ndjson`);
+      const iso = new Date(Date.now() - ageMs).toISOString();
+      const content = [
+        JSON.stringify({ cursor: 1, timestamp: iso, eventType: "lifecycle", workerId: "w1", jobId: id, data: { lifecycle: "queued", workspace: ws, brief: id } }),
+        JSON.stringify({ cursor: 2, timestamp: iso, eventType: "lifecycle", workerId: "w1", jobId: id, data: { lifecycle: status, workspace: ws } })
+      ].join("\n");
+      writeFileSync(f, content, "utf8");
+    };
+
+    // 4 jobs in Project Alpha: 2 old succeeded, 1 new succeeded, 1 failed
+    makeRun("alpha-old-1", "D:/code/Alpha", "succeeded", 5 * 86_400_000); // 5 days old
+    makeRun("alpha-old-2", "D:/code/Alpha", "succeeded", 3 * 86_400_000); // 3 days old
+    makeRun("alpha-new-3", "D:/code/Alpha", "succeeded", 10_000);         // 10s old
+    makeRun("alpha-fail-4", "D:/code/Alpha", "failed", 20_000);           // 20s old
+    // 1 job in Project Beta
+    makeRun("beta-1", "D:/code/Beta", "succeeded", 10_000);
+
+    // Test 1: Clean failed only in Alpha
+    const res1 = await store.cleanJobs({
+      workspace: "Alpha",
+      status: "failed"
+    });
+    expect(res1.deletedCount).toBe(1);
+    expect(res1.deletedJobIds).toEqual(["alpha-fail-4"]);
+    expect(existsSync(path.join(dir, "alpha-fail-4.ndjson"))).toBe(false);
+
+    // Test 2: Clean olderThanDays: 2 in Alpha
+    const res2 = await store.cleanJobs({
+      workspace: "Alpha",
+      olderThanDays: 2
+    });
+    expect(res2.deletedCount).toBe(2);
+    expect(res2.deletedJobIds).toContain("alpha-old-1");
+    expect(res2.deletedJobIds).toContain("alpha-old-2");
+
+    // Test 3: Keep 1 newest in Beta
+    const res3 = await store.cleanJobs({
+      workspace: "Beta",
+      keep: 1
+    });
+    expect(res3.deletedCount).toBe(0); // Only 1 existed, so keep preserved it
+    expect(existsSync(path.join(dir, "beta-1.ndjson"))).toBe(true);
+
+    // Clean Beta completely
+    const res4 = await store.cleanJobs({
+      workspace: "Beta",
+      terminalOnly: true
+    });
+    expect(res4.deletedCount).toBe(1);
+    expect(res4.deletedJobIds).toEqual(["beta-1"]);
+    expect(existsSync(path.join(dir, "beta-1.ndjson"))).toBe(false);
   });
 });

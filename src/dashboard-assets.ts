@@ -581,6 +581,149 @@ export function getDashboardHtml(token: string): string {
       overflow-y: auto;
     }
 
+    .job-item-project {
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: rgba(59, 130, 246, 0.15);
+      color: #60a5fa;
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      max-width: 120px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .btn-clean {
+      background: var(--bg-panel);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-muted);
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .btn-clean:hover {
+      background: var(--bg-hover);
+      color: var(--text-main);
+      border-color: var(--accent);
+    }
+
+    .btn-action-delete {
+      background: none;
+      border: 1px solid rgba(247, 91, 104, 0.4);
+      color: var(--status-failed);
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .btn-action-delete:hover {
+      background: rgba(247, 91, 104, 0.15);
+      border-color: var(--status-failed);
+    }
+
+    /* Clean Modal */
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    .modal-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      width: 440px;
+      max-width: 90vw;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .modal-header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .modal-header h3 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+    .modal-close-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 18px;
+      cursor: pointer;
+      line-height: 1;
+    }
+    .modal-close-btn:hover { color: var(--text-main); }
+    .modal-body {
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--text-main);
+    }
+    .clean-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }
+    .modal-divider {
+      border: none;
+      border-top: 1px solid var(--border-subtle);
+      margin: 6px 0;
+    }
+    .modal-footer {
+      padding: 12px 16px;
+      border-top: 1px solid var(--border-subtle);
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      background: var(--bg-panel);
+    }
+    .btn-danger {
+      background: #dc2626;
+      border: 1px solid #b91c1c;
+      color: #ffffff;
+      padding: 5px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-danger:hover { background: #b91c1c; }
+    .btn-secondary {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-main);
+      padding: 5px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn-secondary:hover { background: var(--bg-hover); }
+
     /* Responsive adjustments for Codex side panel */
     @media (max-width: 700px) {
       .app-body {
@@ -609,6 +752,7 @@ export function getDashboardHtml(token: string): string {
       <div class="header-stats">
         Workers: <strong id="stat-workers">0</strong> &bull; Jobs: <strong id="stat-jobs">0</strong>
       </div>
+      <button id="btn-open-clean-modal" class="btn-clean" title="Clean and prune jobs">🧹 Clean</button>
       <div id="conn-badge" class="conn-badge conn-disconnected">
         <span class="conn-dot"></span>
         <span id="conn-status-text">Connecting...</span>
@@ -622,11 +766,16 @@ export function getDashboardHtml(token: string): string {
       <div class="filter-panel">
         <input id="filter-search" type="text" class="filter-search" placeholder="Search brief or job ID..." />
         <div class="filter-row">
+          <select id="filter-project" class="filter-select">
+            <option value="">All Projects</option>
+          </select>
           <select id="filter-role" class="filter-select">
             <option value="">All Roles</option>
             <option value="implementer">implementer</option>
             <option value="tester">tester</option>
           </select>
+        </div>
+        <div class="filter-row" style="margin-top: 6px;">
           <select id="filter-status" class="filter-select">
             <option value="">All Statuses</option>
             <option value="queued">queued</option>
@@ -635,10 +784,10 @@ export function getDashboardHtml(token: string): string {
             <option value="failed">failed</option>
             <option value="canceled">canceled</option>
           </select>
+          <select id="filter-worker" class="filter-select">
+            <option value="">All Workers</option>
+          </select>
         </div>
-        <select id="filter-worker" class="filter-select">
-          <option value="">All Workers</option>
-        </select>
       </div>
       <div id="job-list" class="job-list"></div>
     </aside>
@@ -655,7 +804,10 @@ export function getDashboardHtml(token: string): string {
               <span id="detail-job-id"></span>
               <span id="detail-status-badge" class="status-badge"></span>
             </div>
-            <div id="detail-time-meta" class="detail-meta-item"></div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <div id="detail-time-meta" class="detail-meta-item"></div>
+              <button id="btn-delete-job" class="btn-action-delete" title="Delete this job from history">🗑️ Delete</button>
+            </div>
           </div>
           <div class="detail-meta-row">
             <div class="detail-meta-item">Worker: <strong id="detail-worker-id"></strong></div>
@@ -683,6 +835,48 @@ export function getDashboardHtml(token: string): string {
         </div>
       </div>
     </main>
+  </div>
+
+  <!-- Clean / Prune Modal Dialog -->
+  <div id="clean-modal-overlay" class="modal-overlay" style="display: none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Clean &amp; Prune Task History</h3>
+        <button id="btn-close-modal" class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <label class="clean-option">
+          <input type="radio" name="clean-mode" value="terminal" checked />
+          <span><strong>Finished Jobs Only</strong> (Delete succeeded, failed, canceled jobs)</span>
+        </label>
+        <label class="clean-option">
+          <input type="radio" name="clean-mode" value="project" />
+          <span><strong>By Project:</strong></span>
+          <select id="clean-modal-project" class="filter-select" style="margin-left: 8px;">
+            <option value="">(Select a project)</option>
+          </select>
+        </label>
+        <label class="clean-option">
+          <input type="radio" name="clean-mode" value="failed" />
+          <span><strong>Failed &amp; Canceled Only</strong> (Keep succeeded jobs)</span>
+        </label>
+        <label class="clean-option">
+          <input type="radio" name="clean-mode" value="all" />
+          <span style="color: var(--status-failed);"><strong>All Jobs</strong> (Reset entire history to 0)</span>
+        </label>
+        <hr class="modal-divider" />
+        <div style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted);">
+          <input type="checkbox" id="clean-keep-check" checked />
+          <span>Keep the newest</span>
+          <input type="number" id="clean-keep-count" value="10" min="0" max="1000" style="width: 55px; background: var(--bg-panel); border: 1px solid var(--border-subtle); color: var(--text-main); padding: 2px 4px; border-radius: 3px;" />
+          <span>jobs</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-modal-cancel" class="btn-secondary">Cancel</button>
+        <button id="btn-modal-confirm" class="btn-danger">Confirm Delete</button>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -752,15 +946,184 @@ export function getDashboardHtml(token: string): string {
 
       // Filter elements
       const filterSearch = document.getElementById("filter-search");
+      const filterProject = document.getElementById("filter-project");
       const filterRole = document.getElementById("filter-role");
       const filterStatus = document.getElementById("filter-status");
       const filterWorker = document.getElementById("filter-worker");
       const jobListContainer = document.getElementById("job-list");
 
+      // Actions & Modal elements
+      const btnDeleteJob = document.getElementById("btn-delete-job");
+      const btnOpenCleanModal = document.getElementById("btn-open-clean-modal");
+      const cleanModalOverlay = document.getElementById("clean-modal-overlay");
+      const btnCloseModal = document.getElementById("btn-close-modal");
+      const btnModalCancel = document.getElementById("btn-modal-cancel");
+      const btnModalConfirm = document.getElementById("btn-modal-confirm");
+      const cleanModalProject = document.getElementById("clean-modal-project");
+      const cleanKeepCheck = document.getElementById("clean-keep-check");
+      const cleanKeepCount = document.getElementById("clean-keep-count");
+
       filterSearch.addEventListener("input", renderJobList);
+      filterProject.addEventListener("change", renderJobList);
       filterRole.addEventListener("change", renderJobList);
       filterStatus.addEventListener("change", renderJobList);
       filterWorker.addEventListener("change", renderJobList);
+
+      if (btnOpenCleanModal) {
+        btnOpenCleanModal.addEventListener("click", function() {
+          if (filterProject.value && cleanModalProject) {
+            cleanModalProject.value = filterProject.value;
+          }
+          cleanModalOverlay.style.display = "flex";
+        });
+      }
+
+      function closeCleanModal() {
+        if (cleanModalOverlay) cleanModalOverlay.style.display = "none";
+      }
+
+      if (btnCloseModal) btnCloseModal.addEventListener("click", closeCleanModal);
+      if (btnModalCancel) btnModalCancel.addEventListener("click", closeCleanModal);
+      if (cleanModalOverlay) {
+        cleanModalOverlay.addEventListener("click", function(e) {
+          if (e.target === cleanModalOverlay) closeCleanModal();
+        });
+      }
+
+      if (btnModalConfirm) {
+        btnModalConfirm.addEventListener("click", async function() {
+          const modeRadio = document.querySelector('input[name="clean-mode"]:checked');
+          const mode = modeRadio ? modeRadio.value : "terminal";
+          const keepEnabled = cleanKeepCheck && cleanKeepCheck.checked;
+          const keep = keepEnabled ? parseInt(cleanKeepCount.value, 10) : undefined;
+
+          const payload = {};
+          if (typeof keep === "number" && !isNaN(keep) && keep >= 0) {
+            payload.keep = keep;
+          }
+
+          if (mode === "terminal") {
+            payload.terminalOnly = true;
+          } else if (mode === "project") {
+            const ws = cleanModalProject.value;
+            if (!ws) {
+              alert("Please select a project to clean.");
+              return;
+            }
+            payload.workspace = ws;
+          } else if (mode === "failed") {
+            payload.status = ["failed", "canceled"];
+          } else if (mode === "all") {
+            payload.terminalOnly = false;
+          }
+
+          const desc = mode === "all" ? "ALL jobs in history" :
+                       mode === "project" ? ("all jobs in project " + cleanModalProject.value) :
+                       mode === "failed" ? "all failed/canceled jobs" :
+                       "all finished jobs";
+          const keepDesc = payload.keep !== undefined ? (" (keeping newest " + payload.keep + ")") : "";
+          if (!confirm("Are you sure you want to delete " + desc + keepDesc + "? This action cannot be undone.")) {
+            return;
+          }
+
+          btnModalConfirm.disabled = true;
+          btnModalConfirm.textContent = "Cleaning...";
+          try {
+            const res = await fetch(BASE_API + "/clean", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+            if (!res.ok) {
+              const errData = await res.json().catch(function() { return {}; });
+              throw new Error(errData.error || ("HTTP " + res.status));
+            }
+            closeCleanModal();
+            await init();
+          } catch (err) {
+            alert("Clean failed: " + err.message);
+          } finally {
+            btnModalConfirm.disabled = false;
+            btnModalConfirm.textContent = "Confirm Delete";
+          }
+        });
+      }
+
+      if (btnDeleteJob) {
+        btnDeleteJob.addEventListener("click", async function() {
+          if (!selectedJobId) return;
+          const curJob = jobsMap.get(selectedJobId);
+          if (curJob && (curJob.status === "queued" || curJob.status === "running")) {
+            alert("Cannot delete an active job (" + curJob.status + "). Wait for it to finish or cancel it first.");
+            return;
+          }
+          if (!confirm("Are you sure you want to delete job " + selectedJobId + "?")) {
+            return;
+          }
+          btnDeleteJob.disabled = true;
+          try {
+            const res = await fetch(BASE_API + "/jobs/" + encodeURIComponent(selectedJobId), {
+              method: "DELETE"
+            });
+            if (!res.ok) {
+              const errData = await res.json().catch(function() { return {}; });
+              throw new Error(errData.error || ("HTTP " + res.status));
+            }
+            jobsMap.delete(selectedJobId);
+            selectedJobId = null;
+            selectedJobData = null;
+            document.getElementById("detail-view").style.display = "none";
+            document.getElementById("no-selection").style.display = "flex";
+            updateProjectOptions();
+            renderJobList();
+          } catch (err) {
+            alert("Failed to delete job: " + err.message);
+          } finally {
+            btnDeleteJob.disabled = false;
+          }
+        });
+      }
+
+      function getProjectName(workspace) {
+        if (!workspace) return "";
+        const parts = workspace.split(/[\\/]/).filter(Boolean);
+        return parts[parts.length - 1] || workspace;
+      }
+
+      function updateProjectOptions() {
+        const selected = filterProject.value;
+        clearNode(filterProject);
+        const optAll = make("option", null, "All Projects");
+        optAll.value = "";
+        filterProject.appendChild(optAll);
+
+        clearNode(cleanModalProject);
+        const optCleanDefault = make("option", null, "(Select a project)");
+        optCleanDefault.value = "";
+        cleanModalProject.appendChild(optCleanDefault);
+
+        const workspaces = new Set();
+        for (const job of jobsMap.values()) {
+          if (job.workspace) workspaces.add(job.workspace);
+        }
+        for (const worker of workersMap.values()) {
+          if (worker.workspace) workspaces.add(worker.workspace);
+        }
+
+        const sorted = Array.from(workspaces).sort();
+        for (const ws of sorted) {
+          const name = getProjectName(ws);
+          const opt = make("option", null, name);
+          opt.value = ws;
+          opt.title = ws;
+          if (ws === selected) opt.selected = true;
+          filterProject.appendChild(opt);
+
+          const optClean = make("option", null, name + " (" + ws + ")");
+          optClean.value = ws;
+          cleanModalProject.appendChild(optClean);
+        }
+      }
 
       function updateWorkerOptions() {
         const selected = filterWorker.value;
@@ -782,6 +1145,7 @@ export function getDashboardHtml(token: string): string {
         clearNode(jobListContainer);
 
         const q = filterSearch.value.trim().toLowerCase();
+        const project = filterProject.value;
         const role = filterRole.value;
         const status = filterStatus.value;
         const workerId = filterWorker.value;
@@ -797,6 +1161,7 @@ export function getDashboardHtml(token: string): string {
         document.getElementById("stat-workers").textContent = String(workersMap.size);
 
         for (const job of allJobs) {
+          if (project && job.workspace !== project) continue;
           if (role && job.role !== role) continue;
           if (status && job.status !== status) continue;
           if (workerId && job.worker_id !== workerId) continue;
@@ -824,6 +1189,12 @@ export function getDashboardHtml(token: string): string {
           const rowMeta = make("div", "job-item-meta");
           const roleBadge = make("span", "job-item-role", job.role || "worker");
           rowMeta.appendChild(roleBadge);
+          if (job.workspace) {
+            const pName = getProjectName(job.workspace);
+            const pBadge = make("span", "job-item-project", pName);
+            pBadge.title = job.workspace;
+            rowMeta.appendChild(pBadge);
+          }
           rowMeta.appendChild(make("span", null, formatTime(job.created_at)));
           item.appendChild(rowMeta);
 
@@ -1124,6 +1495,37 @@ export function getDashboardHtml(token: string): string {
             updateWorkerOptions();
           }
 
+          if (d.lifecycle === "job_deleted" && (evt.jobId || d.job_id)) {
+            const delId = evt.jobId || d.job_id;
+            jobsMap.delete(delId);
+            if (selectedJobId === delId) {
+              selectedJobId = null;
+              selectedJobData = null;
+              document.getElementById("detail-view").style.display = "none";
+              document.getElementById("no-selection").style.display = "flex";
+            }
+            updateProjectOptions();
+            renderJobList();
+            return;
+          }
+
+          if (d.lifecycle === "jobs_cleaned") {
+            if (Array.isArray(d.deleted_jobs)) {
+              for (const jid of d.deleted_jobs) {
+                jobsMap.delete(jid);
+              }
+            }
+            if (selectedJobId && !jobsMap.has(selectedJobId)) {
+              selectedJobId = null;
+              selectedJobData = null;
+              document.getElementById("detail-view").style.display = "none";
+              document.getElementById("no-selection").style.display = "flex";
+            }
+            updateProjectOptions();
+            renderJobList();
+            return;
+          }
+
           if (evt.jobId) {
             let j = jobsMap.get(evt.jobId);
             if (!j) {
@@ -1133,9 +1535,11 @@ export function getDashboardHtml(token: string): string {
                 role: d.role || "implementer",
                 status: "queued",
                 brief: d.brief || "",
-                created_at: evt.timestamp
+                created_at: evt.timestamp,
+                workspace: d.workspace || (workersMap.get(evt.workerId) || {}).workspace
               };
               jobsMap.set(evt.jobId, j);
+              updateProjectOptions();
             }
 
             if (d.lifecycle === "started") {
@@ -1256,13 +1660,19 @@ export function getDashboardHtml(token: string): string {
             lastCursor = snap.latest_cursor;
           }
 
+          updateProjectOptions();
+
           // Check URL query parameters
           const params = new URLSearchParams(window.location.search);
           const qWorker = params.get("worker_id");
           const qJob = params.get("job_id");
+          const qProject = params.get("project") || params.get("workspace");
 
           if (qWorker) {
             filterWorker.value = qWorker;
+          }
+          if (qProject) {
+            filterProject.value = qProject;
           }
 
           renderJobList();

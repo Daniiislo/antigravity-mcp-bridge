@@ -212,16 +212,61 @@ export function createServer(manager: WorkerManager): McpServer {
     }
   });
 
+  server.registerTool("delete_task", {
+    title: "Delete Task History",
+    description: "Delete a completed task run and its event history from disk. Fails if the task is currently active (queued or running).",
+    inputSchema: z.object({
+      job_id: z.string().min(1).describe("Job ID of the finished task to delete")
+    })
+  }, async ({ job_id }) => {
+    try {
+      const result = await manager.deleteJob(job_id);
+      return success(result, `Deleted task ${result.jobId} from history.`);
+    } catch (error) {
+      return failure(error);
+    }
+  });
+
+  server.registerTool("clean_history", {
+    title: "Clean Task History",
+    description: "Prune or clean historical task runs by workspace/project, status, age, or keeping the newest N runs. Active tasks are automatically protected.",
+    inputSchema: z.object({
+      job_id: z.string().optional().describe("Clean a specific job ID"),
+      workspace: z.string().optional().describe("Filter cleanup to a specific workspace directory or project name"),
+      terminal_only: z.boolean().optional().describe("If true, only deletes completed jobs (succeeded, failed, canceled). Defaults to true if neither status nor all are specified."),
+      status: z.union([jobStatusSchema, z.array(jobStatusSchema)]).optional().describe("Filter cleanup to specific statuses (e.g. failed, canceled)"),
+      older_than_days: z.number().min(0).optional().describe("Only clean tasks older than this many days"),
+      keep: z.number().int().min(0).optional().describe("Preserve the newest N tasks matching the criteria"),
+      all: z.boolean().optional().describe("If true, deletes all historical tasks matching filters without requiring terminal_only")
+    })
+  }, async ({ job_id, workspace, terminal_only, status, older_than_days, keep, all }) => {
+    try {
+      const isTerminalOnly = terminal_only !== undefined ? terminal_only : (all ? false : true);
+      const result = await manager.cleanJobs({
+        jobId: job_id,
+        workspace,
+        terminalOnly: isTerminalOnly,
+        status: status as string | string[] | undefined,
+        olderThanDays: older_than_days,
+        keep
+      });
+      return success(result, `Cleaned ${result.deletedCount} tasks from history.`);
+    } catch (error) {
+      return failure(error);
+    }
+  });
+
   server.registerTool("open_dashboard", {
     title: "Open Antigravity Dashboard",
-    description: "Get the local read-only dashboard URL to inspect workers, jobs, conversations, and events.",
+    description: "Get the local dashboard URL to inspect workers, jobs, conversations, and events.",
     inputSchema: z.object({
       worker_id: z.string().optional().describe("Optional worker ID to filter the dashboard"),
-      job_id: z.string().optional().describe("Optional job ID to focus on in the dashboard")
+      job_id: z.string().optional().describe("Optional job ID to focus on in the dashboard"),
+      workspace: z.string().optional().describe("Optional workspace path or project name to filter the dashboard")
     })
-  }, async ({ worker_id, job_id }) => {
+  }, async ({ worker_id, job_id, workspace }) => {
     try {
-      const dashboardUrl = await manager.getDashboardUrl({ workerId: worker_id, jobId: job_id });
+      const dashboardUrl = await manager.getDashboardUrl({ workerId: worker_id, jobId: job_id, workspace });
       if (!dashboardUrl) {
         throw new Error("Dashboard is disabled via configuration (AGY_DASHBOARD_ENABLED=false)");
       }
@@ -229,7 +274,8 @@ export function createServer(manager: WorkerManager): McpServer {
         dashboard_url: dashboardUrl,
         read_only: true,
         ...(worker_id ? { worker_id } : {}),
-        ...(job_id ? { job_id } : {})
+        ...(job_id ? { job_id } : {}),
+        ...(workspace ? { workspace } : {})
       };
       return {
         content: [

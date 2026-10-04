@@ -63,7 +63,7 @@ export class DashboardServer {
     return `http://127.0.0.1:${this.actualPort}/${this.token}/`;
   }
 
-  async getUrl(options?: { workerId?: string | undefined; jobId?: string | undefined }): Promise<string> {
+  async getUrl(options?: { workerId?: string | undefined; jobId?: string | undefined; workspace?: string | undefined }): Promise<string> {
     if (!this.enabled) {
       throw new Error("Dashboard is disabled via AGY_DASHBOARD_ENABLED=false");
     }
@@ -71,6 +71,7 @@ export class DashboardServer {
     const params = new URLSearchParams();
     if (options?.workerId) params.set("worker_id", options.workerId);
     if (options?.jobId) params.set("job_id", options.jobId);
+    if (options?.workspace) params.set("workspace", options.workspace);
     const q = params.toString();
     return q ? `${base}?${q}` : base;
   }
@@ -168,7 +169,7 @@ export class DashboardServer {
     res.end(JSON.stringify(data));
   }
 
-  private handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+  private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     // 1. Loopback remote peer validation
     const remote = req.socket.remoteAddress;
     const isLoopback = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
@@ -210,10 +211,11 @@ export class DashboardServer {
       return;
     }
 
-    // 3. Method validation: Read-only server allows GET and HEAD only
-    if (req.method !== "GET" && req.method !== "HEAD") {
+    // 3. Method validation
+    const allowedMethods = ["GET", "HEAD", "POST", "DELETE"];
+    if (!allowedMethods.includes(req.method || "")) {
       if (typeof req.resume === "function") req.resume();
-      this.sendJsonError(res, 405, "Method not allowed", { "Allow": "GET, HEAD" });
+      this.sendJsonError(res, 405, "Method not allowed", { "Allow": "GET, HEAD, POST, DELETE" });
       return;
     }
 
@@ -241,6 +243,33 @@ export class DashboardServer {
 
     // 5. Route handling
     try {
+      // DELETE routes
+      if (req.method === "DELETE") {
+        if (subpath.startsWith("/api/jobs/")) {
+          const jobId = subpath.slice("/api/jobs/".length);
+          await this.handleDeleteJob(res, jobId);
+          return;
+        }
+        this.sendJsonError(res, 405, "Method not allowed", { "Allow": "GET, HEAD" });
+        return;
+      }
+
+      // POST routes
+      if (req.method === "POST") {
+        if (subpath === "/api/clean") {
+          await this.handleClean(req, res);
+          return;
+        }
+        this.sendJsonError(res, 405, "Method not allowed", { "Allow": "GET, HEAD" });
+        return;
+      }
+
+      // GET and HEAD routes
+      if (subpath === "/api/clean") {
+        this.sendJsonError(res, 405, "Method not allowed", { "Allow": "POST" });
+        return;
+      }
+
       if (subpath === "" || subpath === "/") {
         // Dashboard HTML
         res.writeHead(200, {
@@ -316,6 +345,84 @@ export class DashboardServer {
     }
 
     this.sendJson(res, 200, job);
+  }
+
+  private async handleDeleteJob(res: http.ServerResponse, rawJobId: string): Promise<void> {
+    let jobId: string;
+    try {
+      jobId = decodeURIComponent(rawJobId);
+    } catch {
+      this.sendJsonError(res, 400, "Invalid job ID");
+      return;
+    }
+
+    if (!jobId || !/^[a-zA-Z0-9_-]+$/.test(jobId)) {
+      this.sendJsonError(res, 400, "Invalid job ID");
+      return;
+    }
+
+    try {
+      const result = await this.manager.deleteJob(jobId);
+      if (!result.success) {
+        this.sendJsonError(res, 404, "Job not found");
+        return;
+      }
+      this.sendJson(res, 200, { success: true, jobId, job_id: jobId });
+    } catch (err) {
+      this.sendJsonError(res, 400, err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  private async handleClean(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    try {
+      const body = await this.readJsonBody<Record<string, unknown>>(req);
+      const result = await this.manager.cleanJobs({
+        all: Boolean(body.all),
+        jobId: typeof body.jobId === "string" ? body.jobId : (typeof body.job_id === "string" ? body.job_id : undefined),
+        workspace: typeof body.workspace === "string" ? body.workspace : undefined,
+        status: Array.isArray(body.status) || typeof body.status === "string" ? (body.status as any) : undefined,
+        terminalOnly: body.terminalOnly !== undefined ? Boolean(body.terminalOnly) : (body.terminal_only !== undefined ? Boolean(body.terminal_only) : false),
+        olderThanDays: typeof body.olderThanDays === "number" ? body.olderThanDays : (typeof body.older_than_days === "number" ? body.older_than_days : undefined),
+        keep: typeof body.keep === "number" ? body.keep : undefined
+      });
+      this.sendJson(res, 200, {
+        success: true,
+        deleted_count: result.deletedCount,
+        deletedCount: result.deletedCount,
+        deleted_jobs: result.deletedJobIds,
+        deletedJobIds: result.deletedJobIds
+      });
+    } catch (err) {
+      this.sendJsonError(res, 400, err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  private async readJsonBody<T = Record<string, unknown>>(req: http.IncomingMessage, maxBytes = 32_768): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let body = "";
+      let bytes = 0;
+      req.on("data", (chunk: Buffer) => {
+        bytes += chunk.length;
+        if (bytes > maxBytes) {
+          reject(new Error("Request body too large"));
+          req.destroy();
+          return;
+        }
+        body += chunk.toString("utf8");
+      });
+      req.on("end", () => {
+        if (!body.trim()) {
+          resolve({} as T);
+          return;
+        }
+        try {
+          resolve(JSON.parse(body) as T);
+        } catch {
+          reject(new Error("Invalid JSON in request body"));
+        }
+      });
+      req.on("error", (err) => reject(err));
+    });
   }
 
   private handleEvents(res: http.ServerResponse, parsedUrl: URL): void {

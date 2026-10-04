@@ -2,7 +2,15 @@ import path from "node:path";
 import { normalizeDeniedAction, type AgyTerminalResult, type AgyUsage, type DelegationResult } from "./agy-protocol.js";
 import { AgyWorker, type AgyWorkerRawEvent, type WorkerStatus } from "./agy-worker.js";
 import { resolveAllowedWorkspace, type BridgeConfig, type Role } from "./config.js";
-import { boundStepEvent, boundText, EventStore, type JobHistorySummary, type NormalizedEvent } from "./event-store.js";
+import {
+  boundStepEvent,
+  boundText,
+  EventStore,
+  type CleanJobsOptions,
+  type CleanJobsResult,
+  type JobHistorySummary,
+  type NormalizedEvent
+} from "./event-store.js";
 import { ModelCatalog, type ListModelsResult } from "./model-catalog.js";
 import { DashboardServer } from "./dashboard-server.js";
 
@@ -582,7 +590,7 @@ export class WorkerManager {
     return undefined;
   }
 
-  async getDashboardUrl(options?: { workerId?: string | undefined; jobId?: string | undefined }): Promise<string | undefined> {
+  async getDashboardUrl(options?: { workerId?: string | undefined; jobId?: string | undefined; workspace?: string | undefined }): Promise<string | undefined> {
     if (this.config.dashboardEnabled === false) {
       return undefined;
     }
@@ -600,6 +608,59 @@ export class WorkerManager {
 
   getDashboardServer(): DashboardServer | undefined {
     return this.dashboardServer;
+  }
+
+  async deleteJob(jobId: string): Promise<{ success: boolean; jobId: string }> {
+    const job = this.jobs.get(jobId);
+    if (job && (job.status === "queued" || job.status === "running")) {
+      throw new Error(`Cannot delete active job "${jobId}" with status "${job.status}". Cancel it first.`);
+    }
+
+    const success = this.eventStore.deleteJob(jobId);
+    this.jobs.delete(jobId);
+
+    this.eventStore.recordEvent({
+      eventType: "lifecycle",
+      workerId: job?.workerId || "system",
+      data: {
+        lifecycle: "job_deleted",
+        job_id: jobId
+      }
+    });
+
+    return { success, jobId };
+  }
+
+  async cleanJobs(options: CleanJobsOptions = {}): Promise<CleanJobsResult> {
+    const activeJobIds: string[] = [];
+    for (const [id, job] of this.jobs.entries()) {
+      if (job.status === "queued" || job.status === "running") {
+        activeJobIds.push(id);
+      }
+    }
+
+    const mergedOptions: CleanJobsOptions = {
+      ...options,
+      excludeJobIds: Array.from(new Set([...(options.excludeJobIds || []), ...activeJobIds]))
+    };
+
+    const result = await this.eventStore.cleanJobs(mergedOptions);
+
+    for (const id of result.deletedJobIds) {
+      this.jobs.delete(id);
+    }
+
+    this.eventStore.recordEvent({
+      eventType: "lifecycle",
+      workerId: "system",
+      data: {
+        lifecycle: "jobs_cleaned",
+        deleted_count: result.deletedCount,
+        deleted_jobs: result.deletedJobIds
+      }
+    });
+
+    return result;
   }
 
   // --- Compatibility methods ---
