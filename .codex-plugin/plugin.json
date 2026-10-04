@@ -1,0 +1,24 @@
+{
+  "name": "antigravity-mcp-bridge",
+  "version": "0.1.0",
+  "description": "Local MCP bridge for coordinating persistent Antigravity CLI workers",
+  "author": {
+    "name": "Daniiislo"
+  },
+  "homepage": "https://github.com/Daniiislo/antigravity-mcp-bridge#readme",
+  "repository": "https://github.com/Daniiislo/antigravity-mcp-bridge",
+  "license": "MIT",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Antigravity Bridge",
+    "shortDescription": "Coordinate persistent Antigravity CLI workers as implementers and testers",
+    "longDescription": "A local Model Context Protocol (MCP) server that lets Codex or Claude Code coordinate persistent Antigravity CLI (agy) workers as independent implementers and testers over stdio.",
+    "developerName": "Daniiislo",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/Daniiislo/antigravity-mcp-bridge"
+  }
+}

@@ -23,6 +23,8 @@
     "scripts",
     "plugin.json",
     "mcp.json",
+    ".codex-plugin",
+    ".mcp.json",
     "README.md",
     "LICENSE"
   ],
