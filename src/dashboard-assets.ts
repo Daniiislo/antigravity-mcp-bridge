@@ -1030,9 +1030,9 @@ export function getDashboardHtml(token: string): string {
             let desc = "";
             if (step.step_type) desc += "[" + step.step_type + "] ";
             if (step.state) desc += "state=" + step.state + " ";
-            if (step.text_delta) desc += "\n" + step.text_delta;
-            if (step.tool_name) desc += "\ntool=" + step.tool_name;
-            if (step.command) desc += "\ncommand=" + step.command;
+            if (step.text_delta) desc += "\\n" + step.text_delta;
+            if (step.tool_name) desc += "\\ntool=" + step.tool_name;
+            if (step.command) desc += "\\ncommand=" + step.command;
 
             sItem.appendChild(make("div", "activity-body", desc.trim() || JSON.stringify(step)));
             viewActivity.appendChild(sItem);
@@ -1283,7 +1283,11 @@ export function getDashboardHtml(token: string): string {
         }
       }
 
-      window.addEventListener("DOMContentLoaded", init);
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", init);
+      } else {
+        init();
+      }
     })();
   </script>
 </body>

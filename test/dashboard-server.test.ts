@@ -360,6 +360,20 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
       expect(html).toContain(".textContent");
     });
 
+    it("inline JavaScript script tag parses with zero syntax errors", () => {
+      const token = "a1b2c3d4e5f6789012345678901234567890123456789012";
+      const html = getDashboardHtml(token);
+      const match = html.match(/<script>([\s\S]*?)<\/script>/);
+      expect(match).not.toBeNull();
+      const scriptContent = match?.[1] ?? "";
+      expect(scriptContent.length).toBeGreaterThan(0);
+
+      // Ensure that parsing the script with Function constructor produces no SyntaxErrors
+      expect(() => {
+        new Function(scriptContent);
+      }).not.toThrow();
+    });
+
     it("renders malicious XSS payloads safely as plain text in detail and events", async () => {
       const { mgr, runsDir } = makeManager();
       const xssJobId = "job-xss-test-1";
