@@ -29,7 +29,48 @@ npm run build
 
 ## Register
 
-Choose the directories that Antigravity workers may access, then run one command.
+You can register the bridge in either of two ways:
+
+1. **Method 1: Local Agent Plugin (Recommended for Codex & ChatGPT Desktop):** Registers as an Agent Plugin with full metadata (`plugin.json` / `mcp.json`), making it visible and manageable in the Plugins interface.
+2. **Method 2: Direct MCP Server (Codex CLI or Claude Code):** Adds the stdio server directly to your host's MCP configuration (`config.toml` or `claude.json`).
+
+---
+
+### Method 1: Local Agent Plugin (Codex / ChatGPT Desktop)
+
+Register the bridge into your local plugin marketplace:
+
+```powershell
+npm run register:plugin
+```
+
+To target your personal user marketplace catalog:
+
+```powershell
+# Windows PowerShell:
+npm run register:plugin -- --catalog "$env:USERPROFILE\.agents\plugins\marketplace.json"
+
+# macOS / Linux:
+npm run register:plugin -- --catalog "$HOME/.agents/plugins/marketplace.json"
+```
+
+Alternatively, add the repository directory directly via Codex CLI:
+
+```bash
+codex plugin marketplace add "."
+```
+
+Verify that the plugin is recognized:
+
+```bash
+codex plugin list
+```
+
+---
+
+### Method 2: Direct MCP Server Registration
+
+Specify the workspace directories that Antigravity workers are allowed to access via `--root`:
 
 Codex:
 
@@ -57,26 +98,6 @@ To allow complete Windows drives instead:
 
 ```powershell
 npm run register:codex -- --root "C:\" --root "D:\"
-```
-
-### Agent Plugin Registration (Codex / ChatGPT Desktop)
-
-Register as a local marketplace plugin discoverable by Codex and ChatGPT Desktop:
-
-```powershell
-npm run register:plugin
-```
-
-To target a specific marketplace catalog:
-
-```powershell
-npm run register:plugin -- --catalog "$HOME/.agents/plugins/marketplace.json"
-```
-
-Or add the repository directly via Codex CLI:
-
-```bash
-codex plugin marketplace add "."
 ```
 
 Open a new Codex task or restart Claude Code after registration.
