@@ -25,29 +25,23 @@ agy --version
 git clone https://github.com/Daniiislo/antigravity-codex-mcp.git
 cd antigravity-codex-mcp
 npm ci
-npm test
-npm run typecheck
-npm run smoke
+npm run build
 ```
-
-The smoke test uses the compiled server and a local fake-CLI fixture. It does not consume Antigravity model quota.
 
 ## Register with Codex
 
-`npm run register` is a portable wrapper around `codex mcp add`. It discovers the local `codex`, `agy`, Node.js, and compiled server paths, then asks Codex to register the bridge globally. Codex still owns and starts the MCP server; npm is used only to run the installer.
-
-Preview the exact `codex mcp add` command without changing the Codex configuration:
-
-```bash
-npm run register -- --dry-run --root "/path/to/projects"
-```
-
-Register every directory that Antigravity workers may access. The first `--` tells npm to forward the remaining arguments to the installer. Each repeatable `--root` adds one directory to the bridge allowlist; it does not start or import that directory.
+Choose the directories that Antigravity workers may access, then run one command.
 
 Windows PowerShell:
 
 ```powershell
 npm run register -- --root "C:\Projects" --root "D:\Work"
+```
+
+To allow complete drives instead:
+
+```powershell
+npm run register -- --root "C:\" --root "D:\"
 ```
 
 macOS or Linux:
@@ -56,23 +50,15 @@ macOS or Linux:
 npm run register -- --root "$HOME/Projects" --root "/opt/work"
 ```
 
-For readability, a long PowerShell command may be split with a trailing backtick (`` ` ``), while Bash uses a trailing backslash (`\`). These are shell line-continuation characters only and are not part of the installer syntax.
-
-The installer discovers `codex` and `agy` without shell interpolation. If discovery fails, pass `--codex-bin <path>` or `--agy-bin <path>`. The generated command is equivalent to:
-
-```text
-codex mcp add antigravity-bridge --env "AGY_ALLOWED_ROOTS=<root-list>" --env "AGY_BIN=<agy-path>" -- <node-path> <bridge-dist/index.js>
-```
-
-At runtime, Codex launches the registered Node.js process over MCP stdio. The bridge then creates and supervises Antigravity workers while enforcing the registered root allowlist.
-
-Verify the global registration:
+Verify the installation:
 
 ```bash
 codex mcp get antigravity-bridge
 ```
 
-Start a new Codex task after registration so the MCP tool catalog is reloaded.
+Open a new Codex task. The Antigravity bridge tools are now available.
+
+`--root` may be repeated. Use a project folder for tighter access or a drive root for all directories on that drive. The installer automatically finds `codex`, `agy`, Node.js, and registers the MCP server globally.
 
 ## Controller API
 
