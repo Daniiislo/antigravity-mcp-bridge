@@ -8,7 +8,7 @@
       "name": "antigravity-mcp-bridge",
       "source": {
         "source": "local",
-        "path": "."
+        "path": "F:\\Antigravity MCP Bridge"
       },
       "policy": {
         "installation": "AVAILABLE",
