@@ -1,22 +1,22 @@
 {
-  "name": "antigravity-codex-mcp",
+  "name": "antigravity-mcp-bridge",
   "version": "0.1.0",
-  "description": "Local MCP bridge from Codex to persistent Antigravity CLI workers",
+  "description": "Local MCP bridge for coordinating persistent Antigravity CLI workers",
   "license": "MIT",
-  "homepage": "https://github.com/Daniiislo/antigravity-codex-mcp#readme",
+  "homepage": "https://github.com/Daniiislo/antigravity-mcp-bridge#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Daniiislo/antigravity-codex-mcp.git"
+    "url": "git+https://github.com/Daniiislo/antigravity-mcp-bridge.git"
   },
   "bugs": {
-    "url": "https://github.com/Daniiislo/antigravity-codex-mcp/issues"
+    "url": "https://github.com/Daniiislo/antigravity-mcp-bridge/issues"
   },
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "bin": {
-    "antigravity-codex-mcp": "dist/index.js"
+    "antigravity-mcp-bridge": "dist/index.js"
   },
   "files": [
     "dist",
@@ -29,7 +29,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && vitest run",
     "smoke": "node scripts/smoke.mjs",
-    "register": "node scripts/register-codex.mjs"
+    "register": "node scripts/register-codex.mjs",
+    "register:codex": "node scripts/register-codex.mjs",
+    "register:claude": "node scripts/register-claude.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.3.0",

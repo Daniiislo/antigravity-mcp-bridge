@@ -1,6 +1,6 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { resolveAgyExecutable, resolveCodexExecutable } from "../src/resolve-executable.js";
+import { resolveAgyExecutable, resolveClaudeExecutable, resolveCodexExecutable } from "../src/resolve-executable.js";
 
 describe("resolveAgyExecutable", () => {
   describe("Windows simulated platform (path.win32)", () => {
@@ -331,5 +331,26 @@ describe("resolveCodexExecutable", () => {
       fileExists: (p) => existing.has(p)
     });
     expect(result).toBe(codexBin);
+  });
+});
+
+describe("resolveClaudeExecutable", () => {
+  it("resolves a Windows npm command shim to Claude Code's native executable", () => {
+    const binDir = "C:\\Tools\\bin";
+    const shim = "C:\\Tools\\bin\\claude.cmd";
+    const claudeBin = "C:\\Tools\\bin\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe";
+    expect(resolveClaudeExecutable({
+      env: { Path: binDir, PATHEXT: ".EXE;.CMD" },
+      platform: "win32",
+      fileExists: (candidate) => candidate === shim || candidate === claudeBin
+    })).toBe(claudeBin);
+  });
+
+  it("honors CLAUDE_BIN on POSIX", () => {
+    expect(resolveClaudeExecutable({
+      env: { CLAUDE_BIN: "/opt/claude" },
+      platform: "linux",
+      fileExists: (candidate) => candidate === "/opt/claude"
+    })).toBe("/opt/claude");
   });
 });

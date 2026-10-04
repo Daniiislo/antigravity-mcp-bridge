@@ -252,3 +252,65 @@ export function resolveCodexExecutable(options: ResolveExecutableOptions = {}): 
     `3. Add the directory containing codex to your PATH.`
   );
 }
+
+export function resolveClaudeExecutable(options: ResolveExecutableOptions = {}): string {
+  const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const p = platform === "win32" ? path.win32 : path.posix;
+  const homedir = options.homedir ?? (platform === "win32" && process.platform !== "win32" ? "C:\\Users\\default" : (platform !== "win32" && process.platform === "win32" ? "/home/default" : os.homedir()));
+  const cwd = options.cwd ?? (platform === "win32" && process.platform !== "win32" ? "C:\\workspace" : (platform !== "win32" && process.platform === "win32" ? "/workspace" : process.cwd()));
+  const fileExists = options.fileExists ?? defaultFileExists;
+  const preferNativeWindowsBinary = (candidate: string): string => {
+    if (platform !== "win32" || !/\.(?:cmd|bat)$/i.test(candidate)) return candidate;
+    const nativeBinary = p.join(p.dirname(candidate), "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
+    if (fileExists(nativeBinary)) return nativeBinary;
+    throw new Error(
+      `Claude Code was found only as a Windows command shim: ${candidate}\n` +
+      `Install the current native Claude Code distribution or pass --claude-bin <path-to-claude.exe>.`
+    );
+  };
+
+  const explicit = env.CLAUDE_BIN?.trim();
+  if (explicit) {
+    const hasSep = explicit.includes("/") || explicit.includes("\\");
+    if (hasSep) {
+      const resolved = p.isAbsolute(explicit) ? p.normalize(explicit) : p.resolve(cwd, explicit);
+      if (fileExists(resolved)) return preferNativeWindowsBinary(resolved);
+      throw new Error(`Configured CLAUDE_BIN not found at: ${explicit}`);
+    }
+    const pathResult = searchPathForBinary(explicit, env, platform, fileExists);
+    if (pathResult.found) return preferNativeWindowsBinary(pathResult.found);
+    const resolvedInCwd = p.resolve(cwd, explicit);
+    if (fileExists(resolvedInCwd)) return preferNativeWindowsBinary(resolvedInCwd);
+    throw new Error(`Configured CLAUDE_BIN "${explicit}" not found in PATH or cwd.`);
+  }
+
+  const pathResult = searchPathForBinary("claude", env, platform, fileExists);
+  if (pathResult.found) return preferNativeWindowsBinary(pathResult.found);
+
+  const candidates: string[] = platform === "win32"
+    ? [
+        p.join(homedir, ".local", "bin", "claude.exe"),
+        p.join(homedir, ".local", "bin", "claude.cmd"),
+        p.join(env.APPDATA || p.join(homedir, "AppData", "Roaming"), "npm", "claude.cmd"),
+        p.join(env.APPDATA || p.join(homedir, "AppData", "Roaming"), "npm", "claude.exe")
+      ]
+    : [
+        p.join(homedir, ".local", "bin", "claude"),
+        p.join(homedir, "bin", "claude"),
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude"
+      ];
+
+  for (const candidate of candidates) {
+    if (fileExists(candidate)) return preferNativeWindowsBinary(candidate);
+  }
+
+  throw new Error(
+    `Could not resolve Claude Code executable (claude).\n\n` +
+    `Remedies:\n` +
+    `1. Ensure Claude Code is installed.\n` +
+    `2. Set CLAUDE_BIN or pass --claude-bin <path> to the installer.\n` +
+    `3. Add the directory containing claude to PATH.`
+  );
+}

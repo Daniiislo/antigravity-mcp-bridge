@@ -166,7 +166,7 @@ export class EventStore extends EventEmitter {
     try {
       files = readdirSync(this.runsDir).filter((f) => f.endsWith(".ndjson"));
     } catch (err) {
-      console.error(`[antigravity-codex-mcp] Failed to read runs directory: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`[antigravity-mcp-bridge] Failed to read runs directory: ${err instanceof Error ? err.message : String(err)}`);
       return [];
     }
 
@@ -261,7 +261,7 @@ export class EventStore extends EventEmitter {
           });
         }
       } catch (err) {
-        console.error(`[antigravity-codex-mcp] Failed to read run file ${file}: ${err instanceof Error ? err.message : String(err)}`);
+        console.error(`[antigravity-mcp-bridge] Failed to read run file ${file}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
@@ -478,7 +478,7 @@ export class EventStore extends EventEmitter {
         ...(error !== undefined ? { error: boundText(error, 16_384) } : {})
       };
     } catch (err) {
-      console.error(`[antigravity-codex-mcp] Failed to read job file ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`[antigravity-mcp-bridge] Failed to read job file ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
       return undefined;
     }
   }
@@ -493,7 +493,7 @@ export class EventStore extends EventEmitter {
       appendFileSync(filePath, line, "utf8");
     } catch (err) {
       // Security/reliability invariant: logging failure is reported but does not throw or change agent result
-      console.error(`[antigravity-codex-mcp] Failed to append event to run log: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`[antigravity-mcp-bridge] Failed to append event to run log: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

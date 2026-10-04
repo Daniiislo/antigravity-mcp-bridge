@@ -1,6 +1,7 @@
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildClaudeRegistration,
   buildCodexRegistration,
   executeCodexRegistration,
   formatBashCommand,
@@ -288,5 +289,29 @@ describe("installer CLI and Codex registration", () => {
         })
       ).toThrow(/unsafe control characters/i);
     });
+  });
+});
+
+describe("Claude Code registration", () => {
+  it("builds a user-scoped stdio registration", () => {
+    const plan = buildClaudeRegistration({
+      roots: ["C:\\Projects", "D:\\Work"],
+      agyBin: "C:\\Tools\\agy.cmd",
+      claudeBin: "C:\\Tools\\claude.exe",
+      nodeBin: "C:\\Node\\node.exe",
+      serverScriptPath: "C:\\Bridge\\dist\\index.js",
+      platform: "win32"
+    });
+
+    expect(plan.command).toBe("C:\\Tools\\claude.exe");
+    expect(plan.args).toEqual([
+      "mcp", "add", "antigravity-bridge",
+      "--scope", "user",
+      "--env", "AGY_ALLOWED_ROOTS=C:\\Projects;D:\\Work",
+      "--env", "AGY_BIN=C:\\Tools\\agy.cmd",
+      "--", "C:\\Node\\node.exe", "C:\\Bridge\\dist\\index.js"
+    ]);
+    expect(plan.getCommand).toContain("mcp get antigravity-bridge");
+    expect(plan.removeCommand).toContain("--scope user");
   });
 });

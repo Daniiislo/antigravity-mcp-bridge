@@ -15,6 +15,7 @@ describe("Package Integrity", () => {
     // Required files
     expect(files).toContain("scripts/smoke.mjs");
     expect(files).toContain("scripts/register-codex.mjs");
+    expect(files).toContain("scripts/register-claude.mjs");
     expect(files).toContain("scripts/fixtures/fake-agy.mjs");
     expect(files).toContain("dist/index.js");
     expect(files).toContain("dist/installer.js");
@@ -46,5 +47,10 @@ describe("Package Integrity", () => {
     const regPath = path.join(root, "scripts", "register-codex.mjs");
     const regContent = readFileSync(regPath, "utf8");
     expect(regContent).toContain("dist/installer.js");
+  });
+
+  it("packaged register-claude script references existing dist/installer.js", () => {
+    const regPath = path.join(root, "scripts", "register-claude.mjs");
+    expect(readFileSync(regPath, "utf8")).toContain("dist/installer.js");
   });
 });

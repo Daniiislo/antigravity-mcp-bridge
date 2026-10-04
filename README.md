@@ -1,13 +1,13 @@
-# Antigravity Codex MCP Bridge
+# Antigravity MCP Bridge
 
-A local Model Context Protocol (MCP) server that lets Codex coordinate persistent Antigravity CLI (`agy`) workers as independent implementers and testers.
+A local Model Context Protocol (MCP) server that lets Codex or Claude Code coordinate persistent Antigravity CLI (`agy`) workers as independent implementers and testers.
 
 The bridge uses stdio, starts child processes without a shell, restricts workers to explicit workspace roots, and records bounded NDJSON audit events locally.
 
 ## Requirements
 
 - Node.js 20 or newer
-- Codex CLI or Codex Desktop with local MCP support
+- Codex CLI/Desktop or Claude Code
 - Antigravity CLI (`agy`), authenticated for the current user
 - Git
 
@@ -15,50 +15,53 @@ Verify the required commands:
 
 ```bash
 node --version
-codex --version
 agy --version
 ```
 
 ## Install
 
 ```bash
-git clone https://github.com/Daniiislo/antigravity-codex-mcp.git
-cd antigravity-codex-mcp
+git clone https://github.com/Daniiislo/antigravity-mcp-bridge.git
+cd antigravity-mcp-bridge
 npm ci
 npm run build
 ```
 
-## Register with Codex
+## Register
 
 Choose the directories that Antigravity workers may access, then run one command.
 
-Windows PowerShell:
+Codex:
 
 ```powershell
-npm run register -- --root "C:\Projects" --root "D:\Work"
-```
-
-To allow complete drives instead:
-
-```powershell
-npm run register -- --root "C:\" --root "D:\"
-```
-
-macOS or Linux:
-
-```bash
-npm run register -- --root "$HOME/Projects" --root "/opt/work"
-```
-
-Verify the installation:
-
-```bash
+npm run register:codex -- --root "C:\Projects" --root "D:\Work"
 codex mcp get antigravity-bridge
 ```
 
-Open a new Codex task. The Antigravity bridge tools are now available.
+Claude Code:
 
-`--root` may be repeated. Use a project folder for tighter access or a drive root for all directories on that drive. The installer automatically finds `codex`, `agy`, Node.js, and registers the MCP server globally.
+```powershell
+npm run register:claude -- --root "C:\Projects" --root "D:\Work"
+claude mcp get antigravity-bridge
+```
+
+The same commands work on macOS and Linux with POSIX paths:
+
+```bash
+npm run register:codex -- --root "$HOME/Projects"
+# or
+npm run register:claude -- --root "$HOME/Projects"
+```
+
+To allow complete Windows drives instead:
+
+```powershell
+npm run register:codex -- --root "C:\" --root "D:\"
+```
+
+Open a new Codex task or restart Claude Code after registration.
+
+`--root` may be repeated. Use a project folder for tighter access or a drive root for every directory on that drive. Both installers automatically discover their host CLI, `agy`, and Node.js. Claude Code registration uses the global `user` scope.
 
 ## Controller API
 
@@ -118,8 +121,10 @@ npm ci
 npm test
 npm run build
 codex mcp remove antigravity-bridge
-npm run register -- --root "/path/to/projects"
+npm run register:codex -- --root "/path/to/projects"
 ```
+
+For Claude Code, replace the two commands above with `claude mcp remove antigravity-bridge --scope user` and `npm run register:claude -- ...`.
 
 Registration is replaced as a whole. Include every allowed root when registering again.
 
@@ -129,13 +134,19 @@ Registration is replaced as a whole. Include every allowed root when registering
 codex mcp remove antigravity-bridge
 ```
 
+Claude Code:
+
+```bash
+claude mcp remove antigravity-bridge --scope user
+```
+
 This removes the MCP registration but does not delete the repository or local run logs.
 
 ## Troubleshooting
 
 - **`agy` not found:** install and authenticate `agy`, add it to `PATH`, or pass `--agy-bin`.
 - **Workspace rejected:** register its canonical parent directory with `--root`.
-- **Tools missing:** verify registration, then start a new Codex task.
+- **Tools missing:** verify registration, then start a new Codex task or restart Claude Code.
 - **Registration exists:** remove the existing entry before registering again.
 - **Action denied:** grant only the narrow Antigravity permission required by the task.
 

@@ -22,7 +22,7 @@ function failure(error: unknown) {
 }
 
 export function createServer(manager: WorkerManager): McpServer {
-  const server = new McpServer({ name: "antigravity-codex-mcp", version: "0.1.0" });
+  const server = new McpServer({ name: "antigravity-mcp-bridge", version: "0.1.0" });
 
   // --- Controller Tools ---
 

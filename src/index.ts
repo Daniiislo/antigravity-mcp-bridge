@@ -8,7 +8,7 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const manager = new WorkerManager(config);
   const handle = serveStdio(() => createServer(manager), {
-    onerror: (error) => console.error(`[antigravity-codex-mcp] ${error.message}`)
+    onerror: (error) => console.error(`[antigravity-mcp-bridge] ${error.message}`)
   });
 
   let closing = false;
@@ -22,10 +22,10 @@ async function main(): Promise<void> {
   process.once("SIGTERM", () => { void shutdown().finally(() => process.exit(143)); });
   process.stdin.once("end", () => { void shutdown(); });
   process.once("beforeExit", () => { void manager.stop(); });
-  console.error("[antigravity-codex-mcp] serving over stdio");
+  console.error("[antigravity-mcp-bridge] serving over stdio");
 }
 
 main().catch((error: unknown) => {
-  console.error(`[antigravity-codex-mcp] ${error instanceof Error ? error.message : String(error)}`);
+  console.error(`[antigravity-mcp-bridge] ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 });
