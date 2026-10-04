@@ -37,7 +37,8 @@
     "register:codex": "node scripts/register-codex.mjs",
     "register:claude": "node scripts/register-claude.mjs",
     "register:plugin": "node scripts/register-plugin.mjs",
-    "install:plugin": "node scripts/register-plugin.mjs"
+    "install:plugin": "node scripts/register-plugin.mjs",
+    "dashboard": "node scripts/dashboard.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.3.0",

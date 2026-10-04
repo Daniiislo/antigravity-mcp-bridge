@@ -39,7 +39,10 @@ function searchPathForBinary(
   const p = platform === "win32" ? path.win32 : path.posix;
   const pathEnv = getPathEnv(env);
   const delimiter = platform === "win32" ? ";" : ":";
-  const dirs = pathEnv.split(delimiter).map((d) => d.trim().replace(/^"|"$/g, "")).filter(Boolean);
+  const rawDirs = pathEnv.split(delimiter).map((d) => d.trim().replace(/^"|"$/g, "")).filter(Boolean);
+  const dirs = platform === "win32"
+    ? rawDirs.map((d) => d.replace(/%([^%]+)%/g, (_, v) => env[v] || env[v.toUpperCase()] || env[v.toLowerCase()] || `%${v}%`))
+    : rawDirs;
   const extensions = getPathExt(env, platform);
   const searched: string[] = [];
 
@@ -118,6 +121,8 @@ export function resolveAgyExecutable(options: ResolveExecutableOptions = {}): st
     );
     const localAppData = env.LOCALAPPDATA || p.join(homedir, "AppData", "Local");
     wellKnownCandidates.push(
+      p.join(localAppData, "agy", "bin", "agy.cmd"),
+      p.join(localAppData, "agy", "bin", "agy.exe"),
       p.join(localAppData, "Programs", "Antigravity", "agy.exe"),
       p.join(localAppData, "antigravity", "bin", "agy.cmd"),
       p.join(localAppData, "antigravity", "bin", "agy.exe"),

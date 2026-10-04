@@ -141,6 +141,17 @@ To prevent excessive prompt token consumption in coordinating agents (such as Co
 
 The bridge includes an embedded, read-only local dashboard served over loopback HTTP (`127.0.0.1`):
 
+#### How to Open:
+1. **Via Codex / Claude (During MCP Session):**
+   - Say: *"Mở dashboard"* or *"Open dashboard"*.
+   - Codex calls the `open_dashboard` MCP tool, which returns the direct loopback URL (and clickable `resource_link`).
+   - Every `create_worker`, `dispatch_task`, and `inspect_task` response also includes the relevant dashboard URL.
+2. **Via Command Line (Standalone / History Viewer):**
+   ```bash
+   npm run dashboard
+   ```
+   This starts the local dashboard server, prints the URL, and opens it directly in your default browser to inspect historical runs (`.antigravity-bridge/runs`).
+
 - **Lazy start:** Starts on-demand on an ephemeral or configured port when `open_dashboard` is called or when workers/tasks are created.
 - **Strict loopback & Bearer token:** Bound strictly to `127.0.0.1`, protected by a per-process 48-character hex token in the URL path, and validates `Host` headers to protect against DNS rebinding.
 - **Read-only invariant:** Accepts only `GET` and `HEAD` requests; rejects mutations with `405 Method Not Allowed`.
