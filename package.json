@@ -21,6 +21,8 @@
   "files": [
     "dist",
     "scripts",
+    "plugin.json",
+    "mcp.json",
     "README.md",
     "LICENSE"
   ],
@@ -31,7 +33,9 @@
     "smoke": "node scripts/smoke.mjs",
     "register": "node scripts/register-codex.mjs",
     "register:codex": "node scripts/register-codex.mjs",
-    "register:claude": "node scripts/register-claude.mjs"
+    "register:claude": "node scripts/register-claude.mjs",
+    "register:plugin": "node scripts/register-plugin.mjs",
+    "install:plugin": "node scripts/register-plugin.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.3.0",

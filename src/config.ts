@@ -16,6 +16,8 @@ export interface BridgeConfig {
   dangerouslySkipPermissions: boolean;
   defaultTimeoutMs: number;
   maxStderrBytes: number;
+  dashboardEnabled?: boolean;
+  dashboardPort?: number;
 }
 
 function booleanValue(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
@@ -31,6 +33,16 @@ function positiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number)
   if (raw === undefined || raw === "") return fallback;
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
+  return value;
+}
+
+function portNumber(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0 || value > 65535) {
+    throw new Error(`${name} must be an integer between 0 and 65535`);
+  }
   return value;
 }
 
@@ -70,6 +82,8 @@ export function loadConfig(
   const dangerouslySkipPermissions = booleanValue(env, "AGY_DANGEROUSLY_SKIP_PERMISSIONS", false);
   const defaultTimeoutMs = positiveInteger(env, "AGY_DEFAULT_TIMEOUT_SECONDS", 900) * 1_000;
   const maxStderrBytes = positiveInteger(env, "AGY_MAX_STDERR_BYTES", 32_768);
+  const dashboardEnabled = booleanValue(env, "AGY_DASHBOARD_ENABLED", true);
+  const dashboardPort = portNumber(env, "AGY_DASHBOARD_PORT", 0);
 
   const configuredRoots = env.AGY_ALLOWED_ROOTS?.split(path.delimiter).filter(Boolean) ?? [startDirectory];
   const allowedRoots = configuredRoots.map((root) => canonicalDirectory(root, "AGY_ALLOWED_ROOTS entry"));
@@ -109,6 +123,8 @@ export function loadConfig(
     sandbox,
     dangerouslySkipPermissions,
     defaultTimeoutMs,
-    maxStderrBytes
+    maxStderrBytes,
+    dashboardEnabled,
+    dashboardPort
   };
 }

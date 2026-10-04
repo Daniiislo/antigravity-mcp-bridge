@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "antigravity-bridge": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "./dist/index.js"
+      ],
+      "env": {
+        "AGY_ALLOWED_ROOTS": ".",
+        "AGY_BIN": "agy"
+      }
+    }
+  }
+}

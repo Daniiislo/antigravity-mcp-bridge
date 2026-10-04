@@ -100,6 +100,10 @@ export class EventStore extends EventEmitter {
     this.maxFieldBytes = options.maxFieldBytes ?? 32_768;
   }
 
+  get latestCursor(): number {
+    return this.currentCursor;
+  }
+
   recordEvent(input: RecordEventInput): NormalizedEvent {
     this.currentCursor += 1;
     const sanitizedData = this.sanitizeData(input.data);
@@ -195,10 +199,11 @@ export class EventStore extends EventEmitter {
 
         for (const line of lines) {
           try {
-            const evt = JSON.parse(line) as NormalizedEvent;
+            const evt = JSON.parse(line) as NormalizedEvent & Record<string, unknown>;
             if (evt.jobId) jobId = evt.jobId;
+            else if (!jobId) jobId = file.replace(/\.ndjson$/, "");
             if (evt.workerId) workerId = evt.workerId;
-            const d = evt.data || {};
+            const d = (evt.data || evt.step_update || evt.result || evt.init || {}) as Record<string, unknown>;
 
             if (evt.eventType === "lifecycle") {
               const state = (d.state || d.lifecycle) as string | undefined;
@@ -206,6 +211,7 @@ export class EventStore extends EventEmitter {
                 if (d.role) role = String(d.role);
                 if (d.workspace) workspace = String(d.workspace);
                 if (d.brief) brief = String(d.brief);
+                else if (d.task && !brief) brief = String(d.task);
                 if (!createdAt) createdAt = (d.created_at as string) || evt.timestamp;
                 status = "queued";
               } else if (state === "started" || state === "running") {
@@ -225,7 +231,7 @@ export class EventStore extends EventEmitter {
                 status = "canceled";
                 finishedAt = (d.finished_at as string) || evt.timestamp;
               }
-            } else if (evt.eventType === "result") {
+            } else if (evt.eventType === "result" || evt.event === "result" || evt.result) {
               const resStatus = d.status as string | undefined;
               if (resStatus === "SUCCESS") {
                 status = "succeeded";
@@ -234,7 +240,7 @@ export class EventStore extends EventEmitter {
                 status = "failed";
                 if (typeof d.error === "string") error = d.error;
               }
-              finishedAt = evt.timestamp;
+              finishedAt = evt.timestamp || new Date().toISOString();
               if (typeof d.duration_seconds === "number") durationSeconds = d.duration_seconds;
               if (d.usage) usage = d.usage as AgyUsage;
             }
@@ -347,9 +353,9 @@ export class EventStore extends EventEmitter {
 
       for (const line of lines) {
         try {
-          const evt = JSON.parse(line) as NormalizedEvent;
+          const evt = JSON.parse(line) as NormalizedEvent & Record<string, unknown>;
           if (evt.workerId) workerId = evt.workerId;
-          const d = evt.data || {};
+          const d = (evt.data || evt.step_update || evt.result || evt.init || {}) as Record<string, unknown>;
 
           if (evt.eventType === "lifecycle") {
             const state = (d.state || d.lifecycle) as string | undefined;
@@ -357,6 +363,7 @@ export class EventStore extends EventEmitter {
               if (d.role === "implementer" || d.role === "tester") role = d.role;
               if (d.workspace) workspace = String(d.workspace);
               if (d.brief) brief = String(d.brief);
+              else if (d.task) brief = String(d.task);
               if (d.effective_prompt) effectivePrompt = String(d.effective_prompt);
               if (!createdAt) createdAt = (d.created_at as string) || evt.timestamp;
               status = "queued";
@@ -386,9 +393,10 @@ export class EventStore extends EventEmitter {
                 }
               }
             }
-          } else if (evt.eventType === "init") {
+          } else if (evt.eventType === "init" || evt.event === "init") {
             if (typeof d.conversation_id === "string") conversationId = d.conversation_id;
-          } else if (evt.eventType === "step") {
+            else if (typeof evt.conversation_id === "string") conversationId = evt.conversation_id;
+          } else if (evt.eventType === "step" || evt.event === "step_update" || evt.step_update) {
             stepEvents.push(d);
             const stateStr = String(d.state || "");
             const stepTypeStr = String(d.step_type || "");
@@ -403,8 +411,9 @@ export class EventStore extends EventEmitter {
                 deniedActions.push(norm);
               }
             }
-          } else if (evt.eventType === "result") {
+          } else if (evt.eventType === "result" || evt.event === "result" || evt.result) {
             if (typeof d.conversation_id === "string") conversationId = d.conversation_id;
+            else if (typeof evt.conversation_id === "string") conversationId = evt.conversation_id;
             const resStatus = d.status as string | undefined;
             if (resStatus === "SUCCESS") {
               const resText = typeof d.response === "string" ? d.response : "";
@@ -419,7 +428,7 @@ export class EventStore extends EventEmitter {
               status = "failed";
               if (typeof d.error === "string") error = d.error;
             }
-            finishedAt = evt.timestamp;
+            finishedAt = evt.timestamp || new Date().toISOString();
             if (typeof d.duration_seconds === "number") durationSeconds = d.duration_seconds;
             if (d.usage) usage = d.usage as AgyUsage;
 
@@ -480,6 +489,89 @@ export class EventStore extends EventEmitter {
     } catch (err) {
       console.error(`[antigravity-mcp-bridge] Failed to read job file ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
       return undefined;
+    }
+  }
+
+  readDiskJobEvents(jobId: string): NormalizedEvent[] {
+    if (!jobId || !existsSync(this.runsDir)) return [];
+    const filePath = path.join(this.runsDir, `${jobId}.ndjson`);
+    if (!existsSync(filePath)) return [];
+
+    try {
+      const content = readFileSync(filePath, "utf8");
+      const lines = content.split(/\r?\n/).filter((l) => l.trim().length > 0);
+      const events: NormalizedEvent[] = [];
+      let syntheticCursor = 0;
+
+      for (const line of lines) {
+        try {
+          const raw = JSON.parse(line) as Record<string, unknown>;
+          if (raw && typeof raw === "object") {
+            syntheticCursor += 1;
+            if (raw.eventType && raw.data) {
+              events.push({
+                cursor: typeof raw.cursor === "number" ? raw.cursor : syntheticCursor,
+                timestamp: typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
+                eventType: raw.eventType as EventType,
+                workerId: typeof raw.workerId === "string" ? raw.workerId : "",
+                jobId: typeof raw.jobId === "string" ? raw.jobId : jobId,
+                data: (raw.data as Record<string, unknown>) || {}
+              });
+            } else if (raw.event === "step_update" || raw.step_update) {
+              events.push({
+                cursor: syntheticCursor,
+                timestamp: new Date().toISOString(),
+                eventType: "step",
+                workerId: "",
+                jobId,
+                data: (raw.step_update as Record<string, unknown>) || raw
+              });
+            } else if (raw.event === "result" || raw.result) {
+              events.push({
+                cursor: syntheticCursor,
+                timestamp: typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
+                eventType: "result",
+                workerId: typeof raw.workerId === "string" ? raw.workerId : "",
+                jobId,
+                data: (raw.result as Record<string, unknown>) || raw
+              });
+            } else if (raw.event === "init" || raw.init) {
+              events.push({
+                cursor: syntheticCursor,
+                timestamp: typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
+                eventType: "init",
+                workerId: typeof raw.workerId === "string" ? raw.workerId : "",
+                jobId,
+                data: (raw.init as Record<string, unknown>) || raw
+              });
+            } else if (raw.event === "lifecycle" || raw.lifecycle) {
+              events.push({
+                cursor: syntheticCursor,
+                timestamp: typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
+                eventType: "lifecycle",
+                workerId: typeof raw.workerId === "string" ? raw.workerId : "",
+                jobId,
+                data: (raw.data as Record<string, unknown>) || raw
+              });
+            } else if (raw.event === "stderr" || raw.stderr) {
+              events.push({
+                cursor: syntheticCursor,
+                timestamp: typeof raw.timestamp === "string" ? raw.timestamp : new Date().toISOString(),
+                eventType: "stderr",
+                workerId: typeof raw.workerId === "string" ? raw.workerId : "",
+                jobId,
+                data: (raw.data as Record<string, unknown>) || raw
+              });
+            }
+          }
+        } catch {
+          // ignore malformed line
+        }
+      }
+      return events;
+    } catch (err) {
+      console.error(`[antigravity-mcp-bridge] Failed to read job events from ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
     }
   }
 

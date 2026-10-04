@@ -62,4 +62,23 @@ describe("configuration", () => {
     );
     expect(cfg.executable).toBe("agy");
   });
+
+  it("parses dashboard configuration with safe defaults and validates values", () => {
+    const defaultCfg = loadConfig({}, process.cwd(), { resolveExecutable: false });
+    expect(defaultCfg.dashboardEnabled).toBe(true);
+    expect(defaultCfg.dashboardPort).toBe(0);
+
+    const customCfg = loadConfig(
+      { AGY_DASHBOARD_ENABLED: "false", AGY_DASHBOARD_PORT: "8420" },
+      process.cwd(),
+      { resolveExecutable: false }
+    );
+    expect(customCfg.dashboardEnabled).toBe(false);
+    expect(customCfg.dashboardPort).toBe(8420);
+
+    expect(() => loadConfig({ AGY_DASHBOARD_ENABLED: "maybe" }, process.cwd(), { resolveExecutable: false })).toThrow(/AGY_DASHBOARD_ENABLED/);
+    expect(() => loadConfig({ AGY_DASHBOARD_PORT: "-1" }, process.cwd(), { resolveExecutable: false })).toThrow(/AGY_DASHBOARD_PORT/);
+    expect(() => loadConfig({ AGY_DASHBOARD_PORT: "70000" }, process.cwd(), { resolveExecutable: false })).toThrow(/AGY_DASHBOARD_PORT/);
+    expect(() => loadConfig({ AGY_DASHBOARD_PORT: "not-a-port" }, process.cwd(), { resolveExecutable: false })).toThrow(/AGY_DASHBOARD_PORT/);
+  });
 });

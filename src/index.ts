@@ -21,6 +21,7 @@ async function main(): Promise<void> {
   process.once("SIGINT", () => { void shutdown().finally(() => process.exit(130)); });
   process.once("SIGTERM", () => { void shutdown().finally(() => process.exit(143)); });
   process.stdin.once("end", () => { void shutdown(); });
+  process.stdin.once("close", () => { void shutdown(); });
   process.once("beforeExit", () => { void manager.stop(); });
   console.error("[antigravity-mcp-bridge] serving over stdio");
 }

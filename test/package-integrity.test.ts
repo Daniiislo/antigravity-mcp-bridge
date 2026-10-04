@@ -16,8 +16,13 @@ describe("Package Integrity", () => {
     expect(files).toContain("scripts/smoke.mjs");
     expect(files).toContain("scripts/register-codex.mjs");
     expect(files).toContain("scripts/register-claude.mjs");
+    expect(files).toContain("scripts/register-plugin.mjs");
     expect(files).toContain("scripts/fixtures/fake-agy.mjs");
+    expect(files).toContain("plugin.json");
+    expect(files).toContain("mcp.json");
     expect(files).toContain("dist/index.js");
+    expect(files).toContain("dist/dashboard-server.js");
+    expect(files).toContain("dist/dashboard-assets.js");
     expect(files).toContain("dist/installer.js");
     expect(files).toContain("README.md");
     expect(files).toContain("LICENSE");
@@ -52,5 +57,13 @@ describe("Package Integrity", () => {
   it("packaged register-claude script references existing dist/installer.js", () => {
     const regPath = path.join(root, "scripts", "register-claude.mjs");
     expect(readFileSync(regPath, "utf8")).toContain("dist/installer.js");
+  });
+
+  it("packaged register-plugin script references root manifests and dist", () => {
+    const regPath = path.join(root, "scripts", "register-plugin.mjs");
+    const regContent = readFileSync(regPath, "utf8");
+    expect(regContent).toContain("plugin.json");
+    expect(regContent).toContain("mcp.json");
+    expect(regContent).toContain("dist");
   });
 });

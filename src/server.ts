@@ -54,7 +54,12 @@ export function createServer(manager: WorkerManager): McpServer {
   }, async ({ role, workspace, model, effort, constraints }) => {
     try {
       const result = await manager.createWorker({ role, workspace, model, effort, constraints });
-      return success(result, `Created worker ${result.workerId} (${result.role}) in ${result.workspace}.`);
+      const dashboardUrl = await manager.getDashboardUrl({ workerId: result.workerId });
+      const enriched = {
+        ...result,
+        ...(dashboardUrl ? { dashboard_url: dashboardUrl } : {})
+      };
+      return success(enriched, `Created worker ${result.workerId} (${result.role}) in ${result.workspace}.`);
     } catch (error) {
       return failure(error);
     }
@@ -70,7 +75,12 @@ export function createServer(manager: WorkerManager): McpServer {
   }, async ({ worker_id, brief }) => {
     try {
       const result = await manager.dispatchTask(worker_id, brief);
-      return success(result, `Dispatched task ${result.jobId} to worker ${result.workerId} (status: ${result.status}).`);
+      const dashboardUrl = await manager.getDashboardUrl({ workerId: result.workerId, jobId: result.jobId });
+      const enriched = {
+        ...result,
+        ...(dashboardUrl ? { dashboard_url: dashboardUrl } : {})
+      };
+      return success(enriched, `Dispatched task ${result.jobId} to worker ${result.workerId} (status: ${result.status}).`);
     } catch (error) {
       return failure(error);
     }
@@ -78,11 +88,11 @@ export function createServer(manager: WorkerManager): McpServer {
 
   server.registerTool("wait_task", {
     title: "Wait on Task",
-    description: "Bounded wait for a task to reach terminal state or produce events newer than after_cursor.",
+    description: "Bounded wait for a task to reach terminal state (completion, failure, or cancellation). OMIT after_cursor so the call blocks until the job finishes or reaches wait_ms without burning LLM turns on intermediate events. Calling wait_task without after_cursor is token-efficient and returns terminal=true when completed.",
     inputSchema: z.object({
       job_id: z.string().min(1).describe("Job ID to wait for"),
-      wait_ms: z.number().int().min(0).max(30_000).optional().describe("Bounded wait time in milliseconds (default 5000, max 30000)"),
-      after_cursor: z.number().int().min(0).optional().describe("Return immediately if newer events exist")
+      wait_ms: z.number().int().min(0).max(300_000).optional().describe("Bounded wait time in milliseconds (default 30000, max 300000). Set to 60000-120000 for long tasks."),
+      after_cursor: z.number().int().min(0).optional().describe("Deprecated for LLMs: Optional event cursor. DO NOT poll with this in agent loops as it causes rapid token exhaustion; omit this and wait for terminal state.")
     })
   }, async ({ job_id, wait_ms, after_cursor }) => {
     try {
@@ -117,13 +127,18 @@ export function createServer(manager: WorkerManager): McpServer {
       step_offset: z.number().int().min(0).optional().describe("0-based offset into step events (default 0)"),
       step_limit: z.number().int().min(1).max(100).optional().describe("Maximum step events to return (default 20, max 100)")
     })
-  }, ({ job_id, step_offset, step_limit }) => {
+  }, async ({ job_id, step_offset, step_limit }) => {
     try {
       const result = manager.inspectTask(job_id, { stepOffset: step_offset, stepLimit: step_limit });
+      const dashboardUrl = await manager.getDashboardUrl({ workerId: result.worker_id, jobId: result.job_id });
+      const enriched = {
+        ...result,
+        ...(dashboardUrl ? { dashboard_url: dashboardUrl } : {})
+      };
       const stepsNote = result.has_more_steps
         ? ` (${result.step_events.length}/${result.total_steps} steps shown; use step_offset or agy_events for more)`
         : ` (${result.step_events.length} steps)`;
-      return success(result, `Inspected job ${result.job_id}: status ${result.status}${stepsNote}.`);
+      return success(enriched, `Inspected job ${result.job_id}: status ${result.status}${stepsNote}.`);
     } catch (error) {
       return failure(error);
     }
@@ -192,6 +207,45 @@ export function createServer(manager: WorkerManager): McpServer {
     try {
       const result = await manager.getHistory({ workerId: worker_id, status, limit });
       return success(result, `Retrieved ${result.jobs.length} jobs in history.`);
+    } catch (error) {
+      return failure(error);
+    }
+  });
+
+  server.registerTool("open_dashboard", {
+    title: "Open Antigravity Dashboard",
+    description: "Get the local read-only dashboard URL to inspect workers, jobs, conversations, and events.",
+    inputSchema: z.object({
+      worker_id: z.string().optional().describe("Optional worker ID to filter the dashboard"),
+      job_id: z.string().optional().describe("Optional job ID to focus on in the dashboard")
+    })
+  }, async ({ worker_id, job_id }) => {
+    try {
+      const dashboardUrl = await manager.getDashboardUrl({ workerId: worker_id, jobId: job_id });
+      if (!dashboardUrl) {
+        throw new Error("Dashboard is disabled via configuration (AGY_DASHBOARD_ENABLED=false)");
+      }
+      const structuredContent: Record<string, unknown> = {
+        dashboard_url: dashboardUrl,
+        read_only: true,
+        ...(worker_id ? { worker_id } : {}),
+        ...(job_id ? { job_id } : {})
+      };
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Antigravity dashboard available at ${dashboardUrl} (read-only).`
+          },
+          {
+            type: "resource_link" as const,
+            uri: dashboardUrl,
+            name: "antigravity-dashboard",
+            title: "Antigravity Dashboard"
+          }
+        ],
+        structuredContent
+      };
     } catch (error) {
       return failure(error);
     }

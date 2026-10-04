@@ -25,7 +25,7 @@ const client = new Client({ name: "antigravity-bridge-smoke", version: "0.1.0" }
 try {
   await client.connect(transport);
 
-  // 1. Verify all 14 tools are registered
+  // 1. Verify all 15 tools are registered
   const listed = await client.listTools();
   const names = listed.tools.map((tool) => tool.name).sort();
   const expected = [
@@ -41,6 +41,7 @@ try {
     "dispatch_task",
     "inspect_task",
     "list_models",
+    "open_dashboard",
     "send_followup",
     "wait_task"
   ].sort();
@@ -119,7 +120,16 @@ try {
     throw new Error(`unexpected delegation result: ${JSON.stringify(delegateRes)}`);
   }
 
-  process.stdout.write("MCP smoke test passed: all 14 tools verified, async worker lifecycle (create/dispatch/wait/inspect/close) and compatibility delegation completed.\n");
+  // 5. Dashboard tool: open_dashboard
+  const dashRes = await client.callTool({
+    name: "open_dashboard",
+    arguments: {}
+  });
+  if (dashRes.isError || !dashRes.structuredContent?.dashboard_url || dashRes.structuredContent?.read_only !== true) {
+    throw new Error(`open_dashboard failed: ${JSON.stringify(dashRes)}`);
+  }
+
+  process.stdout.write("MCP smoke test passed: all 15 tools verified, async worker lifecycle (create/dispatch/wait/inspect/close), open_dashboard, and compatibility delegation completed.\n");
 } finally {
   await client.close();
 }

@@ -59,6 +59,26 @@ To allow complete Windows drives instead:
 npm run register:codex -- --root "C:\" --root "D:\"
 ```
 
+### Agent Plugin Registration (Codex / ChatGPT Desktop)
+
+Register as a local marketplace plugin discoverable by Codex and ChatGPT Desktop:
+
+```powershell
+npm run register:plugin
+```
+
+To target a specific marketplace catalog:
+
+```powershell
+npm run register:plugin -- --catalog "$HOME/.agents/plugins/marketplace.json"
+```
+
+Or add the repository directly via Codex CLI:
+
+```bash
+codex plugin marketplace add "."
+```
+
 Open a new Codex task or restart Claude Code after registration.
 
 `--root` may be repeated. Use a project folder for tighter access or a drive root for every directory on that drive. Both installers automatically discover their host CLI, `agy`, and Node.js. Claude Code registration uses the global `user` scope.
@@ -68,7 +88,7 @@ Open a new Codex task or restart Claude Code after registration.
 The preferred asynchronous workflow is:
 
 ```text
-create_worker → dispatch_task → wait_task / agy_events
+create_worker → dispatch_task → wait_task (wait until terminal)
               → inspect_task → send_followup → close_worker
 ```
 
@@ -77,15 +97,35 @@ create_worker → dispatch_task → wait_task / agy_events
 | `list_models` | Discover available Antigravity models with bounded execution and caching. |
 | `create_worker` | Create an isolated implementer or tester in an allowed workspace. |
 | `dispatch_task` | Queue a task and return a `job_id` immediately. |
-| `wait_task` | Wait up to 30 seconds for progress or terminal state. |
-| `agy_events` | Poll normalized events using a cursor. |
+| `wait_task` | Bounded wait (up to 300s) for terminal state. Omit `after_cursor` for token efficiency. |
+| `agy_events` | Poll normalized events using a cursor (intended for dashboards/tools). |
 | `inspect_task` | Read bounded results, usage, errors, tool events, and denied actions. |
 | `send_followup` | Continue the same worker conversation for a fix or recheck. |
 | `cancel_task` | Cancel queued or active work. |
 | `close_worker` | Stop and close a worker. |
 | `agy_history` | Read persisted task summaries after server restarts. |
+| `open_dashboard` | Get the local read-only dashboard URL to inspect workers, jobs, conversations, and events. |
 
 Four compatibility tools remain available: `agy_delegate`, `agy_status`, `agy_stop`, and `agy_reset`.
+
+### Token Conservation & Best Practices
+
+To prevent excessive prompt token consumption in coordinating agents (such as Codex or Claude):
+
+- **Omit `after_cursor` when waiting:** Call `wait_task({ job_id, wait_ms: 60000 })` without `after_cursor`. The call blocks until the task reaches a terminal state (`succeeded`, `failed`, or `canceled`) instead of waking the LLM on every step.
+- **Inspect once on completion:** Call `inspect_task(job_id)` only after `wait_task` reports `terminal: true`.
+- **Use the Web Dashboard for real-time monitoring:** Call `open_dashboard` to inspect live progress, tool calls, and logs in the local web interface without streaming raw JSON events into the LLM context window.
+
+### Local Web Dashboard
+
+The bridge includes an embedded, read-only local dashboard served over loopback HTTP (`127.0.0.1`):
+
+- **Lazy start:** Starts on-demand on an ephemeral or configured port when `open_dashboard` is called or when workers/tasks are created.
+- **Strict loopback & Bearer token:** Bound strictly to `127.0.0.1`, protected by a per-process 48-character hex token in the URL path, and validates `Host` headers to protect against DNS rebinding.
+- **Read-only invariant:** Accepts only `GET` and `HEAD` requests; rejects mutations with `405 Method Not Allowed`.
+- **Self-contained & Safe:** Zero external CDNs, fonts, or remote assets. Enforces a strict Content Security Policy and renders all content using safe DOM text APIs (no untrusted `innerHTML`).
+- **Live SSE streaming:** Delivers real-time lifecycle and step events with reconnect cursor deduplication and polling fallback.
+- **Dense layout:** Split-pane layout optimized for Codex side panel or browser tabs, featuring Conversation view, Activity timeline, and Raw event logs.
 
 ## Configuration
 
@@ -102,15 +142,18 @@ The registration installer writes environment variables into the host MCP config
 | `AGY_EFFORT` | Unset | `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `AGY_SANDBOX` | `false` | Enable Antigravity sandbox mode. |
 | `AGY_DANGEROUSLY_SKIP_PERMISSIONS` | `false` | Bypass prompts; not recommended. |
+| `AGY_DASHBOARD_ENABLED` | `true` | Enable local read-only web dashboard. |
+| `AGY_DASHBOARD_PORT` | `0` | Port for dashboard HTTP server (`0` for dynamic ephemeral port). |
 
 ## Safety properties
 
 - Commands use argument arrays with `shell: false`.
 - Workspace paths are canonicalized and checked against `AGY_ALLOWED_ROOTS`.
-- `wait_task` is capped at 30 seconds.
+- `wait_task` is bounded up to 300 seconds (default 30s) and omits intermediate events by default to conserve tokens.
 - Inspection, stderr, model output, and persisted fields are bounded.
 - Environment variables are excluded from event logs.
 - Empty `SUCCESS` responses and denied actions remain visible as failures or diagnostics.
+- Local read-only dashboard binds strictly to `127.0.0.1`, enforces per-process bearer tokens, validates `Host` headers against DNS rebinding, serves strict CSP headers, and employs safe DOM text APIs with zero external assets.
 - Runtime logs, scratch files, dependencies, build output, and secrets are excluded from Git.
 
 ## Update

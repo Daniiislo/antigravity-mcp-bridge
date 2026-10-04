@@ -4,6 +4,7 @@ import { AgyWorker, type AgyWorkerRawEvent, type WorkerStatus } from "./agy-work
 import { resolveAllowedWorkspace, type BridgeConfig, type Role } from "./config.js";
 import { boundStepEvent, boundText, EventStore, type JobHistorySummary, type NormalizedEvent } from "./event-store.js";
 import { ModelCatalog, type ListModelsResult } from "./model-catalog.js";
+import { DashboardServer } from "./dashboard-server.js";
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
@@ -114,6 +115,8 @@ export class WorkerManager {
   private readonly jobs = new Map<string, JobRecord>();
   private readonly eventStore: EventStore;
   private readonly modelCatalog: ModelCatalog;
+  private readonly runsDir: string;
+  private dashboardServer?: DashboardServer | undefined;
   private workerCounter = 0;
   private jobCounter = 0;
 
@@ -122,8 +125,8 @@ export class WorkerManager {
     private readonly prefixArgs: string[] = config.baseArgs ?? [],
     options?: { runsDir?: string | undefined }
   ) {
-    const runsDir = options?.runsDir || config.runsDir || path.join(process.cwd(), ".antigravity-bridge", "runs");
-    this.eventStore = new EventStore({ runsDir, maxFieldBytes: config.maxStderrBytes });
+    this.runsDir = options?.runsDir || config.runsDir || path.join(process.cwd(), ".antigravity-bridge", "runs");
+    this.eventStore = new EventStore({ runsDir: this.runsDir, maxFieldBytes: config.maxStderrBytes });
     this.modelCatalog = new ModelCatalog({
       executable: config.executable,
       prefixArgs: this.prefixArgs
@@ -259,13 +262,26 @@ export class WorkerManager {
   async waitTask(jobId: string, options?: { waitMs?: number | undefined; afterCursor?: number | undefined }): Promise<WaitTaskResult> {
     const job = this.jobs.get(jobId);
     if (!job) {
+      const persisted = this.eventStore.readDiskJob(jobId);
+      if (persisted) {
+        return {
+          job_id: persisted.job_id,
+          worker_id: persisted.worker_id,
+          status: persisted.status,
+          terminal: true,
+          cursor: this.eventStore.latestCursor,
+          events: [],
+          ...(persisted.result !== undefined ? { result: boundText(persisted.result, 32_768) } : {}),
+          ...(persisted.error !== undefined ? { error: boundText(persisted.error, 16_384) } : {})
+        };
+      }
       throw new Error(`Job not found: ${jobId}`);
     }
 
     const isTerminal = () => job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
     const afterCursor = options?.afterCursor;
-    const MAX_WAIT_MS = 30_000;
-    const boundedWaitMs = Math.min(Math.max(options?.waitMs ?? 5_000, 0), MAX_WAIT_MS);
+    const MAX_WAIT_MS = 300_000;
+    const boundedWaitMs = Math.min(Math.max(options?.waitMs ?? 30_000, 0), MAX_WAIT_MS);
 
     const shouldReturnImmediately = (): boolean => {
       if (isTerminal()) return true;
@@ -302,16 +318,16 @@ export class WorkerManager {
       });
     }
 
-    const eventsRes = this.eventStore.getEvents({ jobId, afterCursor });
+    const eventsRes = afterCursor !== undefined ? this.eventStore.getEvents({ jobId, afterCursor }) : undefined;
     return {
       job_id: job.jobId,
       worker_id: job.workerId,
       status: job.status,
       terminal: isTerminal(),
-      cursor: eventsRes.latest_cursor,
-      events: eventsRes.events,
-      ...(job.result !== undefined ? { result: job.result } : {}),
-      ...(job.error !== undefined ? { error: job.error } : {})
+      cursor: eventsRes?.latest_cursor ?? this.eventStore.latestCursor,
+      events: eventsRes?.events ?? [],
+      ...(job.result !== undefined ? { result: boundText(job.result, 32_768) } : {}),
+      ...(job.error !== undefined ? { error: boundText(job.error, 16_384) } : {})
     };
   }
 
@@ -514,6 +530,78 @@ export class WorkerManager {
     return { jobs: all.slice(0, limit) };
   }
 
+  getExplicitWorkersList(): Array<{
+    workerId: string;
+    role: Role;
+    workspace: string;
+    model?: string | undefined;
+    effort?: string | undefined;
+    constraints?: string | undefined;
+    status: string;
+    createdAt: string;
+    queueDepth: number;
+  }> {
+    return Array.from(this.explicitWorkers.values()).map((w) => ({
+      workerId: w.workerId,
+      role: w.role,
+      workspace: w.workspace,
+      ...(w.model ? { model: w.model } : {}),
+      ...(w.effort ? { effort: w.effort } : {}),
+      ...(w.constraints ? { constraints: w.constraints } : {}),
+      status: w.status,
+      createdAt: w.createdAt,
+      queueDepth: w.queue.length
+    }));
+  }
+
+  getJobDetail(jobId: string): Record<string, unknown> | undefined {
+    const inMem = this.jobs.get(jobId);
+    if (inMem) {
+      const inspected = this.inspectTask(jobId, { stepLimit: 500 });
+      const diskEvents = this.eventStore.readDiskJobEvents(jobId);
+      const liveEvents = this.eventStore.getEvents({ jobId, limit: 500 }).events;
+      const eventsMap = new Map<number, NormalizedEvent>();
+      for (const ev of diskEvents) eventsMap.set(ev.cursor, ev);
+      for (const ev of liveEvents) eventsMap.set(ev.cursor, ev);
+      const mergedEvents = Array.from(eventsMap.values()).sort((a, b) => a.cursor - b.cursor);
+      return {
+        ...inspected,
+        events: mergedEvents
+      };
+    }
+
+    const diskJob = this.eventStore.readDiskJob(jobId, { stepLimit: 500 });
+    if (diskJob) {
+      const diskEvents = this.eventStore.readDiskJobEvents(jobId);
+      return {
+        ...diskJob,
+        events: diskEvents
+      };
+    }
+
+    return undefined;
+  }
+
+  async getDashboardUrl(options?: { workerId?: string | undefined; jobId?: string | undefined }): Promise<string | undefined> {
+    if (this.config.dashboardEnabled === false) {
+      return undefined;
+    }
+    if (!this.dashboardServer) {
+      this.dashboardServer = new DashboardServer({
+        manager: this,
+        eventStore: this.eventStore,
+        runsDir: this.runsDir,
+        port: this.config.dashboardPort,
+        enabled: this.config.dashboardEnabled
+      });
+    }
+    return this.dashboardServer.getUrl(options);
+  }
+
+  getDashboardServer(): DashboardServer | undefined {
+    return this.dashboardServer;
+  }
+
   // --- Compatibility methods ---
 
   async delegate(role: Role, task: string, cwd: string, timeoutSeconds?: number | undefined): Promise<DelegationResult> {
@@ -569,6 +657,9 @@ export class WorkerManager {
     await Promise.all(selected.map(async (item) => this.implicitWorkers.get(item)?.stop()));
     if (!role) {
       await Promise.all(Array.from(this.explicitWorkers.values()).map((w) => w.worker.stop()));
+      if (this.dashboardServer) {
+        await this.dashboardServer.stop();
+      }
     }
   }
 

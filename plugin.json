@@ -1,0 +1,40 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "antigravity-mcp-bridge",
+  "version": "0.1.0",
+  "description": "Local MCP bridge for coordinating persistent Antigravity CLI workers",
+  "homepage": "https://github.com/Daniiislo/antigravity-mcp-bridge#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Daniiislo/antigravity-mcp-bridge.git"
+  },
+  "license": "MIT",
+  "interface": {
+    "displayName": "Antigravity Bridge",
+    "shortDescription": "Coordinate persistent Antigravity CLI workers as implementers and testers",
+    "longDescription": "A local Model Context Protocol (MCP) server that lets Codex or Claude Code coordinate persistent Antigravity CLI (agy) workers as independent implementers and testers over stdio.",
+    "developerName": "Daniiislo",
+    "category": "Development",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/Daniiislo/antigravity-mcp-bridge"
+  },
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Antigravity Bridge",
+        "shortDescription": "Coordinate persistent Antigravity CLI workers as implementers and testers",
+        "longDescription": "A local Model Context Protocol (MCP) server that lets Codex or Claude Code coordinate persistent Antigravity CLI (agy) workers as independent implementers and testers over stdio.",
+        "developerName": "Daniiislo",
+        "category": "Development",
+        "capabilities": [
+          "Interactive",
+          "Write"
+        ],
+        "websiteURL": "https://github.com/Daniiislo/antigravity-mcp-bridge"
+      }
+    }
+  }
+}

@@ -121,6 +121,46 @@ describe("Controller API (Tasks 5-7)", () => {
       expect(Date.now() - start).toBeLessThan(100);
       expect(check.events.length).toBeGreaterThan(0);
     });
+
+    it("wait_task omits events by default when afterCursor is omitted to prevent context bloat and token exhaustion", async () => {
+      const { mgr } = makeManager();
+      const worker = await mgr.createWorker({ role: "tester", workspace: process.cwd() });
+      const job = await mgr.dispatchTask(worker.workerId, "test-token-savings");
+      const waited = await mgr.waitTask(job.jobId, { waitMs: 2_000 });
+
+      expect(waited.terminal).toBe(true);
+      expect(waited.cursor).toBeGreaterThan(0);
+      expect(waited.events).toEqual([]);
+    });
+
+    it("wait_task falls back to persisted disk job if in-memory job is not found", async () => {
+      const runsDir = mkdtempSync(path.join(tmpdir(), "wait-disk-"));
+      tempDirs.push(runsDir);
+      const config: BridgeConfig = {
+        executable: process.execPath,
+        allowedRoots: [process.cwd(), runsDir],
+        sandbox: false,
+        dangerouslySkipPermissions: false,
+        defaultTimeoutMs: 5_000,
+        maxStderrBytes: 4_096
+      };
+      const mgr1 = new WorkerManager(config, [fixture], { runsDir });
+      managers.push(mgr1);
+
+      const worker = await mgr1.createWorker({ role: "tester", workspace: process.cwd() });
+      const job = await mgr1.dispatchTask(worker.workerId, "persisted-task");
+      await mgr1.waitTask(job.jobId, { waitMs: 2_000 });
+
+      // Create a fresh manager simulating restart (in-memory jobs empty)
+      const mgr2 = new WorkerManager(config, [fixture], { runsDir });
+      managers.push(mgr2);
+
+      const waited = await mgr2.waitTask(job.jobId);
+      expect(waited.terminal).toBe(true);
+      expect(waited.job_id).toBe(job.jobId);
+      expect(waited.status).toBe("succeeded");
+      expect(waited.events).toEqual([]);
+    });
   });
 
   describe("send_followup", () => {
