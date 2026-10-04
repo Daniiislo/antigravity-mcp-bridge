@@ -34,31 +34,37 @@ The smoke test uses the compiled server and a local fake-CLI fixture. It does no
 
 ## Register with Codex
 
-Preview the generated registration first:
+`npm run register` is a portable wrapper around `codex mcp add`. It discovers the local `codex`, `agy`, Node.js, and compiled server paths, then asks Codex to register the bridge globally. Codex still owns and starts the MCP server; npm is used only to run the installer.
+
+Preview the exact `codex mcp add` command without changing the Codex configuration:
 
 ```bash
 npm run register -- --dry-run --root "/path/to/projects"
 ```
 
-Register every directory that Antigravity workers may access.
+Register every directory that Antigravity workers may access. The first `--` tells npm to forward the remaining arguments to the installer. Each repeatable `--root` adds one directory to the bridge allowlist; it does not start or import that directory.
 
 Windows PowerShell:
 
 ```powershell
-npm run register -- `
-  --root "C:\Projects" `
-  --root "D:\Work"
+npm run register -- --root "C:\Projects" --root "D:\Work"
 ```
 
 macOS or Linux:
 
 ```bash
-npm run register -- \
-  --root "$HOME/Projects" \
-  --root "/opt/work"
+npm run register -- --root "$HOME/Projects" --root "/opt/work"
 ```
 
-The installer discovers `codex` and `agy` without shell interpolation. If discovery fails, pass `--codex-bin <path>` or `--agy-bin <path>`.
+For readability, a long PowerShell command may be split with a trailing backtick (`` ` ``), while Bash uses a trailing backslash (`\`). These are shell line-continuation characters only and are not part of the installer syntax.
+
+The installer discovers `codex` and `agy` without shell interpolation. If discovery fails, pass `--codex-bin <path>` or `--agy-bin <path>`. The generated command is equivalent to:
+
+```text
+codex mcp add antigravity-bridge --env "AGY_ALLOWED_ROOTS=<root-list>" --env "AGY_BIN=<agy-path>" -- <node-path> <bridge-dist/index.js>
+```
+
+At runtime, Codex launches the registered Node.js process over MCP stdio. The bridge then creates and supervises Antigravity workers while enforcing the registered root allowlist.
 
 Verify the global registration:
 
