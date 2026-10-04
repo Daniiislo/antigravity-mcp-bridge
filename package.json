@@ -27,7 +27,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "npm run build && vitest run",
     "smoke": "node scripts/smoke.mjs",
     "register": "node scripts/register-codex.mjs"
   },

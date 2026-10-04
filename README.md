@@ -27,7 +27,6 @@ cd antigravity-codex-mcp
 npm ci
 npm test
 npm run typecheck
-npm run build
 npm run smoke
 ```
 
@@ -153,7 +152,6 @@ This removes the MCP registration but does not delete the repository or local ru
 ```bash
 npm test
 npm run typecheck
-npm run build
 npm run smoke
 npm audit --audit-level=high
 npm pack --dry-run
