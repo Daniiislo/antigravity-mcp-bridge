@@ -1,0 +1,44 @@
+{
+  "name": "antigravity-codex-mcp",
+  "version": "0.1.0",
+  "description": "Local MCP bridge from Codex to persistent Antigravity CLI workers",
+  "license": "MIT",
+  "homepage": "https://github.com/Daniiislo/antigravity-codex-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Daniiislo/antigravity-codex-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Daniiislo/antigravity-codex-mcp/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "antigravity-codex-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "smoke": "node scripts/smoke.mjs",
+    "register": "node scripts/register-codex.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.3.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.3.0",
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}
