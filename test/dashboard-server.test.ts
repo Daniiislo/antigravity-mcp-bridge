@@ -952,6 +952,91 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
       expect(JSON.parse(res.body).error).toContain("not found");
     });
 
+    it("rejects deletion with 400 when attempting to delete an active (queued/running) job", async () => {
+      const { mgr, runsDir } = makeManager();
+      await mgr.getDashboardUrl();
+      const ds = mgr.getDashboardServer()!;
+      const port = ds.getPort()!;
+
+      const activeJobId = "job-active-test-1";
+      (mgr as any).jobs.set(activeJobId, {
+        jobId: activeJobId,
+        workerId: "w1",
+        status: "running",
+        brief: "in progress task",
+        createdAt: new Date().toISOString()
+      });
+      const file = path.join(runsDir, `${activeJobId}.ndjson`);
+      writeFileSync(file, JSON.stringify({
+        cursor: 1,
+        timestamp: new Date().toISOString(),
+        eventType: "lifecycle",
+        workerId: "w1",
+        jobId: activeJobId,
+        data: { lifecycle: "started", status: "running" }
+      }) + "\n", "utf8");
+
+      const res = await request({
+        port,
+        path: `/${ds.token}/api/jobs/${activeJobId}`,
+        method: "DELETE"
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toContain("Cannot delete active job");
+      expect(existsSync(file)).toBe(true);
+    });
+
+    it("preserves active jobs when executing bulk clean with all: true", async () => {
+      const { mgr, runsDir } = makeManager();
+      await mgr.getDashboardUrl();
+      const ds = mgr.getDashboardServer()!;
+      const port = ds.getPort()!;
+
+      const activeJobId = "job-active-keep-1";
+      const finishedJobId = "job-finished-del-1";
+
+      (mgr as any).jobs.set(activeJobId, {
+        jobId: activeJobId,
+        workerId: "w1",
+        status: "running",
+        brief: "in progress task",
+        createdAt: new Date().toISOString()
+      });
+
+      writeFileSync(path.join(runsDir, `${activeJobId}.ndjson`), JSON.stringify({
+        cursor: 1,
+        timestamp: new Date().toISOString(),
+        eventType: "lifecycle",
+        workerId: "w1",
+        jobId: activeJobId,
+        data: { lifecycle: "started", status: "running" }
+      }) + "\n", "utf8");
+
+      writeFileSync(path.join(runsDir, `${finishedJobId}.ndjson`), JSON.stringify({
+        cursor: 1,
+        timestamp: new Date().toISOString(),
+        eventType: "lifecycle",
+        workerId: "w1",
+        jobId: finishedJobId,
+        data: { lifecycle: "succeeded", status: "succeeded" }
+      }) + "\n", "utf8");
+
+      const res = await request({
+        port,
+        path: `/${ds.token}/api/clean`,
+        method: "POST",
+        body: JSON.stringify({ all: true })
+      });
+
+      expect(res.statusCode).toBe(200);
+      const data = JSON.parse(res.body);
+      expect(data.deletedJobIds).toContain(finishedJobId);
+      expect(data.deletedJobIds).not.toContain(activeJobId);
+      expect(existsSync(path.join(runsDir, `${activeJobId}.ndjson`))).toBe(true);
+      expect(existsSync(path.join(runsDir, `${finishedJobId}.ndjson`))).toBe(false);
+    });
+
     it("prunes runs via POST /api/clean with workspace filter, retention keep, and terminalOnly", async () => {
       const { mgr, es, runsDir } = makeManager();
       await mgr.getDashboardUrl();
