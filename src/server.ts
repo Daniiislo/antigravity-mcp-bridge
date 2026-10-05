@@ -1,6 +1,6 @@
-import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import type { Role } from "./config.js";
+import { TaskAwareServer } from "./task-aware-server.js";
 import { WorkerManager } from "./worker-manager.js";
 
 const roleSchema = z.enum(["implementer", "tester"]);
@@ -21,8 +21,8 @@ function failure(error: unknown) {
   };
 }
 
-export function createServer(manager: WorkerManager): McpServer {
-  const server = new McpServer({ name: "antigravity-mcp-bridge", version: "0.1.0" });
+export function createServer(manager: WorkerManager): TaskAwareServer {
+  const server = new TaskAwareServer({ name: "antigravity-mcp-bridge", version: "0.1.0" }, manager);
 
   // --- Controller Tools ---
 

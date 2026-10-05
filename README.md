@@ -109,15 +109,16 @@ Open a new Codex task or restart Claude Code after registration.
 The preferred asynchronous workflow is:
 
 ```text
-create_worker → dispatch_task → wait_task (wait until terminal)
-              → inspect_task → send_followup → close_worker
+create_worker → dispatch_task → MCP Task (when negotiated; host observes completion)
+              → wait_task → inspect_task (fallback for Tasks-unaware hosts)
+              → send_followup → close_worker
 ```
 
 | Tool | Purpose |
 | --- | --- |
 | `list_models` | Discover available Antigravity models with bounded execution and caching. |
 | `create_worker` | Create an isolated implementer or tester in an allowed workspace. |
-| `dispatch_task` | Queue a task and return a `job_id` immediately. |
+| `dispatch_task` | Queue work. With negotiated MCP Tasks, return a durable task handle; otherwise return a `job_id` immediately. |
 | `wait_task` | Bounded status-only wait (up to 300s) for terminal state. Omits intermediate events; call repeatedly until terminal. |
 | `agy_events` | Diagnostic-only event polling for humans and external tooling. Never call merely because time elapsed. |
 | `inspect_task` | Read a compact result/usage/denial envelope. Prompt and step diagnostics are opt-in. |
@@ -135,8 +136,10 @@ Four compatibility tools remain available: `agy_delegate`, `agy_status`, `agy_st
 
 To prevent excessive prompt token consumption in coordinating agents (such as Codex or Claude):
 
+- **Prefer negotiated MCP Tasks:** The bridge advertises the official `io.modelcontextprotocol/tasks` extension. A compatible host receives a durable task handle from `dispatch_task`, observes it outside the model turn, and gets the compact final result from `tasks/get`. This removes model-driven `wait_task` and `inspect_task` calls.
+- **Capability-safe fallback:** The bridge never returns a Task to a caller that did not declare Tasks support. Existing hosts retain the immediate enqueue response and the bounded wait workflow below.
 - **Use one blocking wait:** Call `wait_task({ job_id })`. The public tool accepts only `job_id` and automatically waits up to 300 seconds. If a bounded response is non-terminal, call `wait_task({ job_id })` again; never call `agy_events`, status, or dashboard merely because time elapsed.
-- **Respect host transport limits:** The bridge requests a 300-second wait, but an MCP host may impose a shorter request timeout. A host timeout does not mean the worker stopped; resume the same job and do not dispatch a duplicate. Guaranteed single-wakeup execution requires negotiated MCP Tasks or verified silent progress-timeout reset, which is not assumed by this bridge.
+- **Respect host transport limits:** The bridge requests a 300-second fallback wait, but an MCP host may impose a shorter request timeout. A host timeout does not mean the worker stopped; resume the same job and do not dispatch a duplicate. Negotiated MCP Tasks avoids holding this long-lived request open.
 - **Wait is status-only:** `wait_task` never returns the worker result or error, so the final payload is not injected twice.
 - **Inspect once on completion:** Call `inspect_task({ job_id })` only after `wait_task` reports `terminal: true`. The default excludes the brief, effective prompt, and step events.
 - **Load diagnostics only when needed:** On failure, use `include_prompt: true` and/or `include_steps: true`; keep them false for successful tasks. Inspection reports `caller_payload_chars` (serialized structured payload before that field is added), a 32,768-character budget, and whether result/error truncation occurred. These are character measurements, not model-token estimates.
@@ -216,6 +219,7 @@ The registration installer writes environment variables into the host MCP config
 - Commands use argument arrays with `shell: false`.
 - Workspace paths are canonicalized and checked against `AGY_ALLOWED_ROOTS`.
 - `wait_task` is bounded up to 300 seconds and omits intermediate events to conserve tokens and prevent controller wake-ups.
+- MCP Tasks uses the official `@modelcontextprotocol/ext-tasks` V2 schemas. The Antigravity `job_id` is the durable MCP `taskId`; terminal `tasks/get` responses include the same bounded inspection payload that previously required a separate `inspect_task` call.
 - Inspection, stderr, model output, and persisted fields are bounded.
 - Environment variables are excluded from event logs.
 - Empty `SUCCESS` responses and denied actions remain visible as failures or diagnostics.

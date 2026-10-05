@@ -392,6 +392,10 @@ export class WorkerManager {
     }, options);
   }
 
+  hasLiveJob(jobId: string): boolean {
+    return this.jobs.has(jobId);
+  }
+
   private compactInspection(source: Omit<InspectTaskResult, "caller_payload_chars" | "response_char_budget" | "response_truncated">, options: InspectTaskOptions): InspectTaskResult {
     const includePrompt = options.includePrompt === true;
     const includeSteps = options.includeSteps === true;

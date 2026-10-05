@@ -478,7 +478,10 @@ export class EventStore extends EventEmitter {
   } | undefined {
     if (!jobId || !existsSync(this.runsDir)) return undefined;
 
-    const filePath = path.join(this.runsDir, `${jobId}.ndjson`);
+    const runsRoot = path.resolve(this.runsDir);
+    const filePath = path.resolve(runsRoot, `${jobId}.ndjson`);
+    const relativePath = path.relative(runsRoot, filePath);
+    if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return undefined;
     if (!existsSync(filePath)) return undefined;
 
     try {

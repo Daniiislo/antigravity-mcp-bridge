@@ -7,7 +7,7 @@ import { WorkerManager } from "./worker-manager.js";
 async function main(): Promise<void> {
   const config = loadConfig();
   const manager = new WorkerManager(config);
-  const handle = serveStdio(() => createServer(manager), {
+  const handle = serveStdio(() => createServer(manager).server, {
     onerror: (error) => console.error(`[antigravity-mcp-bridge] ${error.message}`)
   });
 

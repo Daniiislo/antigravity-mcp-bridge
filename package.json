@@ -43,6 +43,7 @@
     "prune": "node scripts/clean-runs.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/ext-tasks": "^0.2.2",
     "@modelcontextprotocol/server": "^2.3.0",
     "zod": "^4.6.5"
   },

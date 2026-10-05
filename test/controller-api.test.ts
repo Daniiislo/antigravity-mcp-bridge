@@ -4,7 +4,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/client";
-import { InMemoryTransport } from "@modelcontextprotocol/server";
+import { createMcpHandler, InMemoryTransport } from "@modelcontextprotocol/server";
+import {
+  CreateTaskResultV2Schema,
+  GetTaskResultV2Schema,
+  withTaskCapabilityV2
+} from "@modelcontextprotocol/ext-tasks/core/v2";
 import { createServer } from "../src/server.js";
 import type { BridgeConfig } from "../src/config.js";
 import { WorkerManager } from "../src/worker-manager.js";
@@ -734,6 +739,164 @@ describe("Controller API (Tasks 5-7)", () => {
         // Non-terminal summary format check vs terminal summary format check
         const textContent = (res.content as Array<any>)[0].text;
         expect(textContent).toBe(`Job ${job.jobId} status: succeeded (terminal: true).`);
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    });
+  });
+
+  describe("MCP Tasks extension", () => {
+    it("advertises Tasks and returns a durable task for negotiated dispatch_task calls", async () => {
+      const { mgr, runsDir } = makeManager();
+      const handler = createMcpHandler(() => createServer(mgr).server);
+
+      let requestId = 0;
+      const rawRequest = async (
+        target: ReturnType<typeof createMcpHandler>,
+        method: string,
+        params: Record<string, unknown>
+      ) => {
+        const id = ++requestId;
+        const response = await target.fetch(new Request("http://localhost/mcp", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+            "mcp-protocol-version": "2026-07-28",
+            "mcp-method": method,
+            ...((typeof params.name === "string" || typeof params.taskId === "string")
+              ? { "mcp-name": String(params.name ?? params.taskId) }
+              : {})
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id, method, params })
+        }));
+        const message = await response.json() as any;
+        if (message.error) throw new Error(message.error.message);
+        return message.result;
+      };
+
+      try {
+        const envelope = {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { name: "tasks-test-client", version: "1.0.0" },
+          "io.modelcontextprotocol/clientCapabilities": {
+            extensions: { "io.modelcontextprotocol/tasks": {} }
+          }
+        };
+        const discovery = await rawRequest(handler, "server/discover", { _meta: envelope });
+        expect(discovery.capabilities.extensions).toEqual({ "io.modelcontextprotocol/tasks": {} });
+        const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
+        const params = withTaskCapabilityV2({
+          name: "dispatch_task",
+          arguments: { worker_id: worker.workerId, brief: "DELAY:100:mcp-task" }
+        });
+        const created = CreateTaskResultV2Schema.parse(await rawRequest(handler, "tools/call", {
+          ...params,
+          _meta: envelope
+        }));
+
+        expect(created.resultType).toBe("task");
+        expect(created.status).toBe("working");
+        expect(created.taskId).toMatch(/^job-/);
+        expect(created.pollIntervalMs).toBe(60_000);
+
+        await mgr.waitTask(created.taskId, { waitMs: 2_000 });
+        const completed = GetTaskResultV2Schema.parse(await rawRequest(handler, "tasks/get", {
+          taskId: created.taskId,
+          _meta: envelope
+        }));
+
+        expect(completed.status).toBe("completed");
+        if (completed.status !== "completed") throw new Error("Expected completed task");
+        expect(completed.result.structuredContent).toMatchObject({
+          job_id: created.taskId,
+          status: "succeeded",
+          result: "reply:mcp-task:accept-edits"
+        });
+
+        await expect(rawRequest(handler, "tasks/get", {
+          taskId: "../outside",
+          _meta: envelope
+        })).rejects.toThrow(/invalid/i);
+
+        const noTasksEnvelope = {
+          ...envelope,
+          "io.modelcontextprotocol/clientCapabilities": { extensions: {} }
+        };
+        await expect(rawRequest(handler, "tasks/get", {
+          taskId: created.taskId,
+          _meta: noTasksEnvelope
+        })).rejects.toThrow(/extension is required/i);
+
+        const cancelParams = withTaskCapabilityV2({
+          name: "dispatch_task",
+          arguments: { worker_id: worker.workerId, brief: "DELAY:1000:cancelled-task" }
+        });
+        const cancelCreated = CreateTaskResultV2Schema.parse(await rawRequest(handler, "tools/call", {
+          ...cancelParams,
+          _meta: envelope
+        }));
+        await rawRequest(handler, "tasks/cancel", { taskId: cancelCreated.taskId, _meta: envelope });
+        const cancelled = GetTaskResultV2Schema.parse(await rawRequest(handler, "tasks/get", {
+          taskId: cancelCreated.taskId,
+          _meta: envelope
+        }));
+        expect(cancelled.status).toBe("cancelled");
+
+        const orphanParams = withTaskCapabilityV2({
+          name: "dispatch_task",
+          arguments: { worker_id: worker.workerId, brief: "DELAY:1000:orphaned" }
+        });
+        const orphanCreated = CreateTaskResultV2Schema.parse(await rawRequest(handler, "tools/call", {
+          ...orphanParams,
+          _meta: envelope
+        }));
+        await new Promise((resolve) => setTimeout(resolve, 30));
+
+        const restarted = new WorkerManager({
+          executable: process.execPath,
+          allowedRoots: [process.cwd(), runsDir],
+          sandbox: false,
+          dangerouslySkipPermissions: false,
+          defaultTimeoutMs: 5_000,
+          maxStderrBytes: 4_096
+        }, [fixture], { runsDir });
+        managers.push(restarted);
+        const restartedHandler = createMcpHandler(() => createServer(restarted).server);
+        try {
+          const orphaned = GetTaskResultV2Schema.parse(await rawRequest(restartedHandler, "tasks/get", {
+            taskId: orphanCreated.taskId,
+            _meta: envelope
+          }));
+          expect(orphaned.status).toBe("failed");
+          if (orphaned.status !== "failed") throw new Error("Expected orphaned task failure");
+          expect(orphaned.error.message).toMatch(/ORPHANED_JOB/);
+        } finally {
+          await restartedHandler.close();
+        }
+      } finally {
+        await handler.close();
+      }
+    });
+
+    it("keeps the immediate enqueue response when the caller did not negotiate Tasks", async () => {
+      const { mgr } = makeManager();
+      const server = createServer(mgr);
+      const [t1, t2] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "legacy-test-client", version: "1.0.0" });
+
+      await server.connect(t1);
+      await client.connect(t2);
+
+      try {
+        const worker = await mgr.createWorker({ role: "tester", workspace: process.cwd() });
+        const response = await client.callTool({
+          name: "dispatch_task",
+          arguments: { worker_id: worker.workerId, brief: "legacy-dispatch" }
+        });
+        expect(response).not.toHaveProperty("resultType", "task");
+        expect(response.structuredContent).toMatchObject({ workerId: worker.workerId });
       } finally {
         await client.close();
         await server.close();
