@@ -295,7 +295,7 @@ export class WorkerManager {
     const isTerminal = () => job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
     const afterCursor = options?.afterCursor;
     const MAX_WAIT_MS = 300_000;
-    const boundedWaitMs = Math.min(Math.max(options?.waitMs ?? 30_000, 0), MAX_WAIT_MS);
+    const boundedWaitMs = Math.min(Math.max(options?.waitMs ?? 300_000, 0), MAX_WAIT_MS);
 
     const shouldReturnImmediately = (): boolean => {
       if (isTerminal()) return true;

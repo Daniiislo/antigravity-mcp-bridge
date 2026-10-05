@@ -44,19 +44,19 @@ The worker parses stdout line-by-line, records `init` and `step_update` metadata
 - `list_models(refresh?)`: return parsed model choices and cache metadata.
 - `create_worker(role, workspace, model?, effort?, constraints?)`: create an idle worker and return `worker_id`.
 - `dispatch_task(worker_id, brief)`: enqueue work and return `job_id` immediately.
-- `wait_task(job_id, wait_ms?, after_cursor?)`: bounded wait for new progress or terminal state.
+- `wait_task(job_id)`: bounded wait (up to 300s) for terminal state. Progress events and timing arguments are not accepted; non-terminal results direct the controller to call `wait_task` again.
 - `send_followup(worker_id, finding)`: enqueue related work in the same conversation.
 - `inspect_task(job_id)`: return job metadata, tool/step events, errors, denied actions, usage, and handoff/result.
 - `cancel_task(job_id)`: cancel queued work; canceling active work terminates its process and invalidates that worker conversation.
 - `close_worker(worker_id)`: cancel its outstanding work, stop its process, and close it.
-- `agy_events(worker_id?, job_id?, after_cursor?, limit?)`: poll normalized events.
+- `agy_events(worker_id?, job_id?, after_cursor?, limit?)`: poll normalized events for human diagnostics only; never for elapsed time during a running job.
 - `agy_history(worker_id?, status?, limit?)`: list newest jobs with terminal summaries.
 
 The original `agy_delegate`, `agy_status`, `agy_stop`, and `agy_reset` remain compatibility tools. They use one implicit worker per role.
 
 ### Job states
 
-`queued → running → succeeded | failed | canceled`. Each event receives a monotonically increasing cursor within the server. `wait_task` never waits longer than its validated bound and returns immediately when the job is terminal or events newer than `after_cursor` exist.
+`queued → running → succeeded | failed | canceled`. Each event receives a monotonically increasing cursor within the server. Public `wait_task` never waits longer than 300 seconds and returns immediately when the job is terminal. Internal `waitTask` optionally accepts `after_cursor` and `waitMs` (default 300,000 ms, max 300,000 ms) for deterministic tests.
 
 ### `agy_stop`
 

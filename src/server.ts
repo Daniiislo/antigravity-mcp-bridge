@@ -78,15 +78,17 @@ export function createServer(manager: WorkerManager): McpServer {
 
   server.registerTool("wait_task", {
     title: "Wait on Task",
-    description: "Bounded status-only wait for terminal state. Progress events are intentionally unavailable here; use the dashboard or agy_events outside LLM loops.",
+    description: "Bounded status-only wait for terminal state. Waits up to 300 seconds per call. If the job is still running, call wait_task again; never inspect events, status, or dashboard merely because time elapsed.",
     inputSchema: z.object({
-      job_id: z.string().min(1).describe("Job ID to wait for"),
-      wait_ms: z.number().int().min(0).max(300_000).optional().describe("Bounded wait time in milliseconds (default 30000, max 300000). Set to 60000-120000 for long tasks.")
+      job_id: z.string().min(1).describe("Job ID to wait for")
     })
-  }, async ({ job_id, wait_ms }) => {
+  }, async ({ job_id }) => {
     try {
-      const result = await manager.waitTask(job_id, { waitMs: wait_ms });
-      return success(result, `Job ${result.job_id} status: ${result.status} (terminal: ${result.terminal}).`);
+      const result = await manager.waitTask(job_id);
+      const summary = result.terminal
+        ? `Job ${result.job_id} status: ${result.status} (terminal: true).`
+        : `Job ${result.job_id} is running (terminal: false). Call wait_task again; do not inspect events, status, or dashboard.`;
+      return success(result, summary);
     } catch (error) {
       return failure(error);
     }
@@ -165,7 +167,7 @@ export function createServer(manager: WorkerManager): McpServer {
 
   server.registerTool("agy_events", {
     title: "Poll Antigravity Events",
-    description: "Poll normalized events with cursor, worker, and job filtering.",
+    description: "Human and diagnostic tool only. Poll normalized events with cursor, worker, and job filtering. Never call merely because time elapsed during a running job.",
     inputSchema: z.object({
       worker_id: z.string().optional().describe("Filter events by worker ID"),
       job_id: z.string().optional().describe("Filter events by job ID"),

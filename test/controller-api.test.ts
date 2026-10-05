@@ -3,6 +3,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/server";
+import { createServer } from "../src/server.js";
 import type { BridgeConfig } from "../src/config.js";
 import { WorkerManager } from "../src/worker-manager.js";
 
@@ -475,13 +478,13 @@ describe("Controller API (Tasks 5-7)", () => {
       expect(JSON.stringify(persisted).length).toBeLessThan(32_768);
     });
 
-    it("caps wait_task timeout to 30,000ms max", async () => {
+    it("caps wait_task timeout to 300,000ms max", async () => {
       const { mgr } = makeManager();
       const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
       const job = await mgr.dispatchTask(worker.workerId, "DELAY:50:fast");
 
-      // Pass excessive waitMs (e.g. 120_000)
-      const waited = await mgr.waitTask(job.jobId, { waitMs: 120_000 });
+      // Pass excessive waitMs (e.g. 500_000)
+      const waited = await mgr.waitTask(job.jobId, { waitMs: 500_000 });
       expect(waited.terminal).toBe(true);
       expect(waited.status).toBe("succeeded");
     });
@@ -689,6 +692,52 @@ describe("Controller API (Tasks 5-7)", () => {
       await mgr.reset("implementer");
       const resetStatus = mgr.status("implementer");
       expect(resetStatus[0]!.state).toBe("stopped");
+    });
+  });
+
+  describe("public MCP wait_task interface", () => {
+    it("strips legacy wait_ms and after_cursor, does not short-poll, and returns terminal true with empty events", async () => {
+      const { mgr } = makeManager();
+      const server = createServer(mgr);
+      const [t1, t2] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "test-client", version: "1.0.0" });
+
+      await server.connect(t1);
+      await client.connect(t2);
+
+      try {
+        const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
+        // Dispatch delayed task (250ms)
+        const job = await mgr.dispatchTask(worker.workerId, "DELAY:250:mcp-wait");
+
+        const start = Date.now();
+        // Pass legacy wait_ms: 0 and after_cursor: 0
+        const res = await client.callTool({
+          name: "wait_task",
+          arguments: {
+            job_id: job.jobId,
+            wait_ms: 0,
+            after_cursor: 0
+          }
+        });
+        const elapsed = Date.now() - start;
+
+        expect(res.isError).toBeFalsy();
+        // Must not return immediately (proves wait_ms: 0 was stripped and didn't short-poll)
+        expect(elapsed).toBeGreaterThanOrEqual(200);
+
+        const structured = res.structuredContent as any;
+        expect(structured.terminal).toBe(true);
+        expect(structured.status).toBe("succeeded");
+        expect(structured.events).toEqual([]);
+
+        // Non-terminal summary format check vs terminal summary format check
+        const textContent = (res.content as Array<any>)[0].text;
+        expect(textContent).toBe(`Job ${job.jobId} status: succeeded (terminal: true).`);
+      } finally {
+        await client.close();
+        await server.close();
+      }
     });
   });
 });
