@@ -1,4 +1,5 @@
 export interface AgyUsage {
+  /** Tokens consumed inside the Antigravity worker, not by the calling MCP controller. */
   input_tokens: number;
   output_tokens: number;
   thinking_tokens: number;

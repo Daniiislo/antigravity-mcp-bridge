@@ -46,7 +46,8 @@ describe("Controller API (Tasks 5-7)", () => {
       expect(worker.workerId).toMatch(/^worker-implementer-/);
       expect(worker.role).toBe("implementer");
       expect(worker.workspace).toBe(process.cwd());
-      expect(worker.constraints).toBe("Never run git commit");
+      expect(worker.hasConstraints).toBe(true);
+      expect(worker).not.toHaveProperty("constraints");
       expect(worker.status).toBe("idle");
     });
 
@@ -77,7 +78,9 @@ describe("Controller API (Tasks 5-7)", () => {
       const waited = await mgr.waitTask(job.jobId, { waitMs: 2_000 });
       expect(waited.terminal).toBe(true);
       expect(waited.status).toBe("succeeded");
-      expect(waited.result).toContain("reply:async-test:accept-edits");
+      expect(waited).not.toHaveProperty("result");
+      expect(waited).not.toHaveProperty("error");
+      expect(mgr.inspectTask(job.jobId).result).toContain("reply:async-test:accept-edits");
     });
 
     it("prepends worker constraints to dispatched task prompt", async () => {
@@ -92,7 +95,7 @@ describe("Controller API (Tasks 5-7)", () => {
       const waited = await mgr.waitTask(job.jobId, { waitMs: 2_000 });
       expect(waited.terminal).toBe(true);
 
-      const inspected = mgr.inspectTask(job.jobId);
+      const inspected = mgr.inspectTask(job.jobId, { includePrompt: true });
       expect(inspected.effective_prompt).toContain("MUST NOT USE ANY");
       expect(inspected.effective_prompt).toContain("test prompt");
     });
@@ -160,6 +163,8 @@ describe("Controller API (Tasks 5-7)", () => {
       expect(waited.job_id).toBe(job.jobId);
       expect(waited.status).toBe("succeeded");
       expect(waited.events).toEqual([]);
+      expect(waited).not.toHaveProperty("result");
+      expect(waited).not.toHaveProperty("error");
     });
   });
 
@@ -179,7 +184,8 @@ describe("Controller API (Tasks 5-7)", () => {
 
       expect(inspectSecond.conversation_id).toBeDefined();
       expect(inspectSecond.conversation_id).toBe(inspectFirst.conversation_id);
-      expect(secondWaited.result).toContain("reply:turn two:accept-edits");
+      expect(secondWaited).not.toHaveProperty("result");
+      expect(inspectSecond.result).toContain("reply:turn two:accept-edits");
     });
   });
 
@@ -197,7 +203,11 @@ describe("Controller API (Tasks 5-7)", () => {
       expect(inspected.role).toBe("implementer");
       expect(inspected.workspace).toBe(process.cwd());
       expect(inspected.status).toBe("succeeded");
-      expect(inspected.step_events.length).toBeGreaterThan(0);
+      expect(inspected).not.toHaveProperty("step_events");
+      expect(inspected).not.toHaveProperty("brief");
+      expect(inspected).not.toHaveProperty("effective_prompt");
+      expect(inspected.caller_payload_chars).toBeGreaterThan(0);
+      expect(inspected.response_char_budget).toBe(32_768);
       expect(inspected.denied_actions.length).toBeGreaterThan(0);
       expect(inspected.usage).toBeDefined();
       expect(inspected.result).toBe("handled denial");
@@ -214,9 +224,9 @@ describe("Controller API (Tasks 5-7)", () => {
       const job = await mgr1.dispatchTask(worker.workerId, "DENIED");
       await mgr1.waitTask(job.jobId, { waitMs: 2_000 });
 
-      const beforeRestart = mgr1.inspectTask(job.jobId);
+      const beforeRestart = mgr1.inspectTask(job.jobId, { includePrompt: true, includeSteps: true });
       expect(beforeRestart.status).toBe("succeeded");
-      expect(beforeRestart.step_events.length).toBeGreaterThan(0);
+      expect(beforeRestart.step_events!.length).toBeGreaterThan(0);
       expect(beforeRestart.denied_actions.length).toBeGreaterThan(0);
 
       // Simulate server restart with a new WorkerManager instance on the same runsDir
@@ -231,7 +241,7 @@ describe("Controller API (Tasks 5-7)", () => {
       const mgr2 = new WorkerManager(config, [fixture], { runsDir });
       managers.push(mgr2);
 
-      const afterRestart = mgr2.inspectTask(job.jobId);
+      const afterRestart = mgr2.inspectTask(job.jobId, { includePrompt: true, includeSteps: true });
       expect(afterRestart.job_id).toBe(job.jobId);
       expect(afterRestart.worker_id).toBe(worker.workerId);
       expect(afterRestart.role).toBe("implementer");
@@ -244,7 +254,7 @@ describe("Controller API (Tasks 5-7)", () => {
       expect(afterRestart.finished_at).toBeDefined();
       expect(afterRestart.duration_seconds).toBeDefined();
       expect(afterRestart.conversation_id).toBe(beforeRestart.conversation_id);
-      expect(afterRestart.step_events.length).toBe(beforeRestart.step_events.length);
+      expect(afterRestart.step_events!.length).toBe(beforeRestart.step_events!.length);
       expect(afterRestart.denied_actions).toEqual(beforeRestart.denied_actions);
       expect(afterRestart.usage).toBeDefined();
       expect(afterRestart.result).toBe("handled denial");
@@ -258,24 +268,24 @@ describe("Controller API (Tasks 5-7)", () => {
       await mgr.waitTask(job.jobId, { waitMs: 2_000 });
 
       // Default inspection should return max 20 steps
-      const defaultInspect = mgr.inspectTask(job.jobId);
+      const defaultInspect = mgr.inspectTask(job.jobId, { includeSteps: true });
       expect(defaultInspect.total_steps).toBe(25);
       expect(defaultInspect.step_offset).toBe(0);
       expect(defaultInspect.step_limit).toBe(20);
       expect(defaultInspect.has_more_steps).toBe(true);
-      expect(defaultInspect.step_events.length).toBe(20);
-      expect(defaultInspect.step_events[0]?.text_delta).toBe("step 1");
-      expect(defaultInspect.step_events[19]?.text_delta).toBe("step 20");
+      expect(defaultInspect.step_events!.length).toBe(20);
+      expect(defaultInspect.step_events![0]?.text_delta).toBe("step 1");
+      expect(defaultInspect.step_events![19]?.text_delta).toBe("step 20");
 
       // Paginate next page: offset 20, limit 10
-      const page2 = mgr.inspectTask(job.jobId, { stepOffset: 20, stepLimit: 10 });
+      const page2 = mgr.inspectTask(job.jobId, { includeSteps: true, stepOffset: 20, stepLimit: 10 });
       expect(page2.total_steps).toBe(25);
       expect(page2.step_offset).toBe(20);
       expect(page2.step_limit).toBe(10);
       expect(page2.has_more_steps).toBe(false);
-      expect(page2.step_events.length).toBe(5);
-      expect(page2.step_events[0]?.text_delta).toBe("step 21");
-      expect(page2.step_events[4]?.text_delta).toBe("step 25");
+      expect(page2.step_events!.length).toBe(5);
+      expect(page2.step_events![0]?.text_delta).toBe("step 21");
+      expect(page2.step_events![4]?.text_delta).toBe("step 25");
     });
 
     it("preserves bounded inspection and pagination after server restart", async () => {
@@ -297,18 +307,18 @@ describe("Controller API (Tasks 5-7)", () => {
       const mgr2 = new WorkerManager(config, [fixture], { runsDir });
       managers.push(mgr2);
 
-      const inspect1 = mgr2.inspectTask(job.jobId);
+      const inspect1 = mgr2.inspectTask(job.jobId, { includeSteps: true });
       expect(inspect1.total_steps).toBe(25);
       expect(inspect1.step_offset).toBe(0);
       expect(inspect1.step_limit).toBe(20);
       expect(inspect1.has_more_steps).toBe(true);
-      expect(inspect1.step_events.length).toBe(20);
+      expect(inspect1.step_events!.length).toBe(20);
 
-      const inspect2 = mgr2.inspectTask(job.jobId, { stepOffset: 20, stepLimit: 10 });
+      const inspect2 = mgr2.inspectTask(job.jobId, { includeSteps: true, stepOffset: 20, stepLimit: 10 });
       expect(inspect2.total_steps).toBe(25);
       expect(inspect2.step_offset).toBe(20);
       expect(inspect2.has_more_steps).toBe(false);
-      expect(inspect2.step_events.length).toBe(5);
+      expect(inspect2.step_events!.length).toBe(5);
     });
 
     it("parses normalized denied actions from result records and persisted logs", async () => {
@@ -320,7 +330,7 @@ describe("Controller API (Tasks 5-7)", () => {
       expect(waited.terminal).toBe(true);
       expect(waited.status).toBe("succeeded");
 
-      const live = mgr1.inspectTask(job.jobId);
+      const live = mgr1.inspectTask(job.jobId, { includePrompt: true, includeSteps: true });
       expect(live.status).toBe("succeeded");
       expect(live.total_denied_actions).toBe(1);
       expect(live.denied_actions).toEqual(["RunCommand (command)"]);
@@ -424,24 +434,24 @@ describe("Controller API (Tasks 5-7)", () => {
       const job = await mgr1.dispatchTask(worker.workerId, "OVERSIZED");
       await mgr1.waitTask(job.jobId, { waitMs: 2_000 });
 
-      const live = mgr1.inspectTask(job.jobId);
+      const live = mgr1.inspectTask(job.jobId, { includePrompt: true, includeSteps: true });
       // Result was 150_000 chars; must be bounded
       expect(live.result).toBeDefined();
       expect(live.result!.length).toBeLessThan(35_000);
       expect(live.result).toContain("[truncated]");
 
       // Effective prompt was > 50_000 chars; must be bounded
-      expect(live.effective_prompt.length).toBeLessThan(20_000);
+      expect(live.effective_prompt!.length).toBeLessThan(20_000);
       expect(live.effective_prompt).toContain("[truncated]");
 
       // Step event text_delta was 100_000 chars; must be bounded
-      expect(live.step_events[0]?.text_delta).toBeDefined();
-      expect(String(live.step_events[0]!.text_delta).length).toBeLessThan(6_000);
-      expect(String(live.step_events[0]!.text_delta)).toContain("[truncated]");
+      expect(live.step_events![0]?.text_delta).toBeDefined();
+      expect(String(live.step_events![0]!.text_delta).length).toBeLessThan(6_000);
+      expect(String(live.step_events![0]!.text_delta)).toContain("[truncated]");
 
       // Entire inspect response serialized size must be well under 100 KB
       const serialized = JSON.stringify(live);
-      expect(serialized.length).toBeLessThan(100_000);
+      expect(serialized.length).toBeLessThan(32_768);
 
       // Verify underlying event remains accessible via cursor pagination
       const eventsRes = mgr1.getEvents({ jobId: job.jobId });
@@ -462,7 +472,7 @@ describe("Controller API (Tasks 5-7)", () => {
       const persisted = mgr2.inspectTask(job.jobId);
       expect(persisted.result!.length).toBeLessThan(35_000);
       expect(persisted.result).toContain("[truncated]");
-      expect(JSON.stringify(persisted).length).toBeLessThan(100_000);
+      expect(JSON.stringify(persisted).length).toBeLessThan(32_768);
     });
 
     it("caps wait_task timeout to 30,000ms max", async () => {

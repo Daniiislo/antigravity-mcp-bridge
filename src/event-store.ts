@@ -13,32 +13,90 @@ export function boundText(
   return text.slice(0, maxChars) + suffix;
 }
 
+export function sanitizeAggregate(
+  val: unknown,
+  depth = 0,
+  currentChars = { count: 0 },
+  maxChars = 4_096,
+  maxDepth = 8,
+  maxKeys = 50,
+  maxArrayElements = 50
+): unknown {
+  if (val === undefined || val === null) return val;
+  if (currentChars.count >= maxChars) return "[truncated]";
+  if (depth > maxDepth) return "[max_depth_exceeded]";
+
+  if (typeof val === "string") {
+    const remaining = maxChars - currentChars.count;
+    if (remaining <= 0) return "[truncated]";
+    if (val.length <= remaining) {
+      currentChars.count += val.length;
+      return val;
+    }
+    const truncated = val.slice(0, Math.max(0, remaining - 18)) + " ... [truncated]";
+    currentChars.count += truncated.length;
+    return truncated;
+  }
+
+  if (typeof val === "number" || typeof val === "boolean") {
+    currentChars.count += 8;
+    return val;
+  }
+
+  if (typeof val === "bigint" || typeof val === "symbol" || typeof val === "function") {
+    const str = String(val);
+    currentChars.count += str.length;
+    return str;
+  }
+
+  if (Array.isArray(val)) {
+    const arr: unknown[] = [];
+    const elementsToProcess = val.slice(0, maxArrayElements);
+    for (const item of elementsToProcess) {
+      if (currentChars.count >= maxChars) {
+        arr.push("[truncated]");
+        break;
+      }
+      arr.push(sanitizeAggregate(item, depth + 1, currentChars, maxChars, maxDepth, maxKeys, maxArrayElements));
+    }
+    if (val.length > maxArrayElements) {
+      arr.push(`... [${val.length - maxArrayElements} items truncated]`);
+    }
+    return arr;
+  }
+
+  if (typeof val === "object") {
+    // Avoid circular/special objects
+    if (val === process.env) return undefined;
+    const clean: Record<string, unknown> = {};
+    const entries = Object.entries(val as Record<string, unknown>);
+    const entriesToProcess = entries.slice(0, maxKeys);
+    for (const [k, v] of entriesToProcess) {
+      if (currentChars.count >= maxChars) {
+        clean._truncated = true;
+        break;
+      }
+      currentChars.count += k.length + 4;
+      clean[k] = sanitizeAggregate(v, depth + 1, currentChars, maxChars, maxDepth, maxKeys, maxArrayElements);
+    }
+    if (entries.length > maxKeys) {
+      clean._keys_truncated = entries.length - maxKeys;
+    }
+    return clean;
+  }
+
+  return String(val);
+}
+
 export function boundStepEvent(
   event: Record<string, unknown>,
   maxFieldChars = 4_096
 ): Record<string, unknown> {
-  const bounded: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(event)) {
-    if (typeof v === "string") {
-      bounded[k] = v.length > maxFieldChars
-        ? v.slice(0, maxFieldChars) + " ... [truncated]"
-        : v;
-    } else if (v && typeof v === "object") {
-      try {
-        const str = JSON.stringify(v);
-        if (str.length > maxFieldChars) {
-          bounded[k] = { ...((v as Record<string, unknown>) || {}), _truncated: true };
-        } else {
-          bounded[k] = v;
-        }
-      } catch {
-        bounded[k] = v;
-      }
-    } else {
-      bounded[k] = v;
-    }
+  const bounded = sanitizeAggregate(event, 0, { count: 0 }, maxFieldChars, 8, 30, 30);
+  if (bounded && typeof bounded === "object" && !Array.isArray(bounded)) {
+    return bounded as Record<string, unknown>;
   }
-  return bounded;
+  return { value: bounded };
 }
 
 export type EventType = "lifecycle" | "init" | "step" | "result" | "stderr";

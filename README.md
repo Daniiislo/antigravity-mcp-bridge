@@ -120,7 +120,7 @@ create_worker → dispatch_task → wait_task (wait until terminal)
 | `dispatch_task` | Queue a task and return a `job_id` immediately. |
 | `wait_task` | Bounded wait (up to 300s) for terminal state. Omit `after_cursor` for token efficiency. |
 | `agy_events` | Poll normalized events using a cursor (intended for dashboards/tools). |
-| `inspect_task` | Read bounded results, usage, errors, tool events, and denied actions. |
+| `inspect_task` | Read a compact result/usage/denial envelope. Prompt and step diagnostics are opt-in. |
 | `send_followup` | Continue the same worker conversation for a fix or recheck. |
 | `cancel_task` | Cancel queued or active work. |
 | `close_worker` | Stop and close a worker. |
@@ -136,7 +136,11 @@ Four compatibility tools remain available: `agy_delegate`, `agy_status`, `agy_st
 To prevent excessive prompt token consumption in coordinating agents (such as Codex or Claude):
 
 - **Omit `after_cursor` when waiting:** Call `wait_task({ job_id, wait_ms: 60000 })` without `after_cursor`. The call blocks until the task reaches a terminal state (`succeeded`, `failed`, or `canceled`) instead of waking the LLM on every step.
-- **Inspect once on completion:** Call `inspect_task(job_id)` only after `wait_task` reports `terminal: true`.
+- **Wait is status-only:** `wait_task` never returns the worker result or error, so the final payload is not injected twice.
+- **Inspect once on completion:** Call `inspect_task({ job_id })` only after `wait_task` reports `terminal: true`. The default excludes the brief, effective prompt, and step events.
+- **Load diagnostics only when needed:** On failure, use `include_prompt: true` and/or `include_steps: true`; keep them false for successful tasks. Inspection reports `caller_payload_chars` (serialized structured payload before that field is added), a 32,768-character budget, and whether result/error truncation occurred. These are character measurements, not model-token estimates.
+- **Open the dashboard explicitly:** Frequent lifecycle tools omit dashboard URLs; call `open_dashboard` only when a human actually needs live diagnostics.
+- **Separate token domains:** `usage` is Antigravity worker usage. It must not be presented as tokens consumed by the calling Codex/Claude controller.
 - **Use the Web Dashboard for real-time monitoring:** Call `open_dashboard` to inspect live progress, tool calls, and logs in the local web interface without streaming raw JSON events into the LLM context window.
 
 ### Local Web Dashboard & Project Filtering
@@ -147,7 +151,6 @@ The bridge includes an embedded local dashboard served over loopback HTTP (`127.
 1. **Via Codex / Claude (During MCP Session):**
    - Say: *"Mở dashboard"* or *"Open dashboard"*.
    - Codex calls the `open_dashboard` MCP tool, which returns the direct loopback URL (and clickable `resource_link`).
-   - Every `create_worker`, `dispatch_task`, and `inspect_task` response also includes the relevant dashboard URL.
 2. **Via Command Line (Standalone / History Viewer):**
    ```bash
    npm run dashboard

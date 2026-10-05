@@ -54,12 +54,7 @@ export function createServer(manager: WorkerManager): McpServer {
   }, async ({ role, workspace, model, effort, constraints }) => {
     try {
       const result = await manager.createWorker({ role, workspace, model, effort, constraints });
-      const dashboardUrl = await manager.getDashboardUrl({ workerId: result.workerId });
-      const enriched = {
-        ...result,
-        ...(dashboardUrl ? { dashboard_url: dashboardUrl } : {})
-      };
-      return success(enriched, `Created worker ${result.workerId} (${result.role}) in ${result.workspace}.`);
+      return success(result, `Created worker ${result.workerId} (${result.role}) in ${result.workspace}.`);
     } catch (error) {
       return failure(error);
     }
@@ -75,12 +70,7 @@ export function createServer(manager: WorkerManager): McpServer {
   }, async ({ worker_id, brief }) => {
     try {
       const result = await manager.dispatchTask(worker_id, brief);
-      const dashboardUrl = await manager.getDashboardUrl({ workerId: result.workerId, jobId: result.jobId });
-      const enriched = {
-        ...result,
-        ...(dashboardUrl ? { dashboard_url: dashboardUrl } : {})
-      };
-      return success(enriched, `Dispatched task ${result.jobId} to worker ${result.workerId} (status: ${result.status}).`);
+      return success(result, `Dispatched task ${result.jobId} to worker ${result.workerId} (status: ${result.status}).`);
     } catch (error) {
       return failure(error);
     }
@@ -121,24 +111,21 @@ export function createServer(manager: WorkerManager): McpServer {
 
   server.registerTool("inspect_task", {
     title: "Inspect Task",
-    description: "Inspect task metadata, step events, denied actions, usage, and result/error with bounded step pagination.",
+    description: "Inspect a compact terminal result. Prompt and step diagnostics are opt-in to conserve caller tokens.",
     inputSchema: z.object({
       job_id: z.string().min(1).describe("Job ID to inspect"),
+      include_prompt: z.boolean().optional().describe("Include bounded brief and effective prompt (default false)"),
+      include_steps: z.boolean().optional().describe("Include bounded step diagnostics (default false)"),
       step_offset: z.number().int().min(0).optional().describe("0-based offset into step events (default 0)"),
       step_limit: z.number().int().min(1).max(100).optional().describe("Maximum step events to return (default 20, max 100)")
     })
-  }, async ({ job_id, step_offset, step_limit }) => {
+  }, async ({ job_id, include_prompt, include_steps, step_offset, step_limit }) => {
     try {
-      const result = manager.inspectTask(job_id, { stepOffset: step_offset, stepLimit: step_limit });
-      const dashboardUrl = await manager.getDashboardUrl({ workerId: result.worker_id, jobId: result.job_id });
-      const enriched = {
-        ...result,
-        ...(dashboardUrl ? { dashboard_url: dashboardUrl } : {})
-      };
-      const stepsNote = result.has_more_steps
-        ? ` (${result.step_events.length}/${result.total_steps} steps shown; use step_offset or agy_events for more)`
-        : ` (${result.step_events.length} steps)`;
-      return success(enriched, `Inspected job ${result.job_id}: status ${result.status}${stepsNote}.`);
+      const result = manager.inspectTask(job_id, { includePrompt: include_prompt, includeSteps: include_steps, stepOffset: step_offset, stepLimit: step_limit });
+      const stepsNote = result.step_events
+        ? ` (${result.step_events.length}/${result.total_steps} diagnostic steps shown)`
+        : "";
+      return success(result, `Inspected job ${result.job_id}: status ${result.status}${stepsNote}.`);
     } catch (error) {
       return failure(error);
     }

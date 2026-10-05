@@ -30,7 +30,7 @@ export interface ExplicitWorkerInfo {
   workspace: string;
   model?: string | undefined;
   effort?: string | undefined;
-  constraints?: string | undefined;
+  hasConstraints: boolean;
   status: "idle" | "busy" | "closed";
   conversationId?: string | undefined;
   createdAt: string;
@@ -82,8 +82,13 @@ export interface WaitTaskResult {
   terminal: boolean;
   cursor: number;
   events: NormalizedEvent[];
-  result?: string | undefined;
-  error?: string | undefined;
+}
+
+export interface InspectTaskOptions {
+  includePrompt?: boolean | undefined;
+  includeSteps?: boolean | undefined;
+  stepOffset?: number | undefined;
+  stepLimit?: number | undefined;
 }
 
 export interface InspectTaskResult {
@@ -92,18 +97,18 @@ export interface InspectTaskResult {
   role: Role;
   workspace: string;
   status: JobStatus;
-  brief: string;
-  effective_prompt: string;
+  brief?: string | undefined;
+  effective_prompt?: string | undefined;
   created_at: string;
   started_at?: string | undefined;
   finished_at?: string | undefined;
   duration_seconds?: number | undefined;
   conversation_id?: string | undefined;
   total_steps: number;
-  step_offset: number;
-  step_limit: number;
-  has_more_steps: boolean;
-  step_events: Array<{
+  step_offset?: number | undefined;
+  step_limit?: number | undefined;
+  has_more_steps?: boolean | undefined;
+  step_events?: Array<{
     step_type?: string | undefined;
     state?: string | undefined;
     text_delta?: string | undefined;
@@ -115,6 +120,9 @@ export interface InspectTaskResult {
   usage?: AgyUsage | undefined;
   result?: string | undefined;
   error?: string | undefined;
+  caller_payload_chars: number;
+  response_char_budget: number;
+  response_truncated: boolean;
 }
 
 export class WorkerManager {
@@ -202,7 +210,7 @@ export class WorkerManager {
       workspace,
       model: info.model,
       effort: info.effort,
-      constraints: options.constraints,
+      hasConstraints: Boolean(options.constraints),
       status: "idle",
       createdAt: info.createdAt
     };
@@ -279,8 +287,6 @@ export class WorkerManager {
           terminal: true,
           cursor: this.eventStore.latestCursor,
           events: [],
-          ...(persisted.result !== undefined ? { result: boundText(persisted.result, 32_768) } : {}),
-          ...(persisted.error !== undefined ? { error: boundText(persisted.error, 16_384) } : {})
         };
       }
       throw new Error(`Job not found: ${jobId}`);
@@ -333,18 +339,16 @@ export class WorkerManager {
       status: job.status,
       terminal: isTerminal(),
       cursor: eventsRes?.latest_cursor ?? this.eventStore.latestCursor,
-      events: eventsRes?.events ?? [],
-      ...(job.result !== undefined ? { result: boundText(job.result, 32_768) } : {}),
-      ...(job.error !== undefined ? { error: boundText(job.error, 16_384) } : {})
+      events: eventsRes?.events ?? []
     };
   }
 
-  inspectTask(jobId: string, options?: { stepOffset?: number | undefined; stepLimit?: number | undefined }): InspectTaskResult {
+  inspectTask(jobId: string, options: InspectTaskOptions = {}): InspectTaskResult {
     const job = this.jobs.get(jobId);
     if (!job) {
       const persisted = this.eventStore.readDiskJob(jobId, options);
       if (persisted) {
-        return persisted;
+        return this.compactInspection(persisted, options);
       }
       throw new Error(`Job not found: ${jobId}`);
     }
@@ -361,14 +365,14 @@ export class WorkerManager {
     const slicedDenied = job.deniedActions.slice(0, MAX_DENIED);
     const hasMoreDenied = totalDenied > slicedDenied.length;
 
-    return {
+    return this.compactInspection({
       job_id: job.jobId,
       worker_id: job.workerId,
       role: job.role,
       workspace: job.workspace,
       status: job.status,
-      brief: boundText(job.brief, 8_192) ?? "",
-      effective_prompt: boundText(job.effectivePrompt, 16_384) ?? "",
+      brief: job.brief,
+      effective_prompt: job.effectivePrompt,
       created_at: job.createdAt,
       ...(job.startedAt ? { started_at: job.startedAt } : {}),
       ...(job.finishedAt ? { finished_at: job.finishedAt } : {}),
@@ -383,9 +387,40 @@ export class WorkerManager {
       denied_actions: slicedDenied,
       has_more_denied_actions: hasMoreDenied,
       ...(job.usage ? { usage: job.usage } : {}),
-      ...(job.result !== undefined ? { result: boundText(job.result, 32_768) } : {}),
-      ...(job.error !== undefined ? { error: boundText(job.error, 16_384) } : {})
+      ...(job.result !== undefined ? { result: job.result } : {}),
+      ...(job.error !== undefined ? { error: job.error } : {})
+    }, options);
+  }
+
+  private compactInspection(source: Omit<InspectTaskResult, "caller_payload_chars" | "response_char_budget" | "response_truncated">, options: InspectTaskOptions): InspectTaskResult {
+    const includePrompt = options.includePrompt === true;
+    const includeSteps = options.includeSteps === true;
+    const resultWasTruncated = (source.result?.length ?? 0) > 12_288;
+    const errorWasTruncated = (source.error?.length ?? 0) > 4_096;
+    const compact: Omit<InspectTaskResult, "caller_payload_chars"> = {
+      job_id: source.job_id, worker_id: source.worker_id, role: source.role, workspace: source.workspace,
+      status: source.status, created_at: source.created_at, total_steps: source.total_steps,
+      total_denied_actions: source.total_denied_actions, denied_actions: source.denied_actions.slice(0, 20),
+      has_more_denied_actions: source.has_more_denied_actions,
+      ...(source.started_at ? { started_at: source.started_at } : {}),
+      ...(source.finished_at ? { finished_at: source.finished_at } : {}),
+      ...(source.duration_seconds !== undefined ? { duration_seconds: source.duration_seconds } : {}),
+      ...(source.conversation_id ? { conversation_id: source.conversation_id } : {}),
+      ...(source.usage ? { usage: source.usage } : {}),
+      ...(source.result !== undefined ? { result: boundText(source.result, 12_288) } : {}),
+      ...(source.error !== undefined ? { error: boundText(source.error, 4_096) } : {}),
+      ...(includePrompt ? { brief: boundText(source.brief, 2_048) ?? "", effective_prompt: boundText(source.effective_prompt, 4_096) ?? "" } : {}),
+      ...(includeSteps ? {
+        step_offset: source.step_offset ?? 0,
+        step_limit: source.step_limit ?? 20,
+        has_more_steps: source.has_more_steps ?? false,
+        step_events: (source.step_events ?? []).map((event) => boundStepEvent(event, 512))
+      } : {}),
+      response_char_budget: 32_768,
+      response_truncated: resultWasTruncated || errorWasTruncated
     };
+    const chars = JSON.stringify(compact).length;
+    return { ...compact, caller_payload_chars: chars };
   }
 
   async cancelTask(jobId: string): Promise<{ jobId: string; status: JobStatus; active: boolean }> {

@@ -786,7 +786,7 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
       }
     });
 
-    it("create_worker, dispatch_task, inspect_task include useful URLs, while polling tools do not", async () => {
+    it("frequent lifecycle tools omit dashboard URLs to conserve caller context", async () => {
       const { mgr } = makeManager();
       const server = createServer(mgr);
       const [t1, t2] = InMemoryTransport.createLinkedPair();
@@ -796,24 +796,22 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
       await client.connect(t2);
 
       try {
-        // 1. create_worker includes worker-filtered URL
+        // Dashboard access is explicit through open_dashboard only.
         const workerRes = await client.callTool({
           name: "create_worker",
           arguments: { role: "implementer", workspace: process.cwd() }
         });
         const wSc = workerRes.structuredContent as any;
         expect(wSc.workerId).toBeDefined();
-        expect(wSc.dashboard_url).toContain(`worker_id=${wSc.workerId}`);
+        expect(wSc.dashboard_url).toBeUndefined();
 
-        // 2. dispatch_task includes direct job URL with both workerId and jobId
         const dispatchRes = await client.callTool({
           name: "dispatch_task",
           arguments: { worker_id: wSc.workerId, brief: "test task" }
         });
         const dSc = dispatchRes.structuredContent as any;
         expect(dSc.jobId).toBeDefined();
-        expect(dSc.dashboard_url).toContain(`worker_id=${wSc.workerId}`);
-        expect(dSc.dashboard_url).toContain(`job_id=${dSc.jobId}`);
+        expect(dSc.dashboard_url).toBeUndefined();
 
         // 3. wait_task (polling) does NOT include dashboard_url
         const waitRes = await client.callTool({
@@ -833,13 +831,13 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
         expect(eventsSc.events).toBeDefined();
         expect(eventsSc.dashboard_url).toBeUndefined();
 
-        // 5. inspect_task includes dashboard_url
+        // inspect_task is compact too.
         const inspectRes = await client.callTool({
           name: "inspect_task",
           arguments: { job_id: dSc.jobId }
         });
         const insSc = inspectRes.structuredContent as any;
-        expect(insSc.dashboard_url).toContain(`job_id=${dSc.jobId}`);
+        expect(insSc.dashboard_url).toBeUndefined();
       } finally {
         await client.close();
         await server.close();
