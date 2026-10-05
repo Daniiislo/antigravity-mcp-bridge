@@ -816,10 +816,12 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
         // 3. wait_task (polling) does NOT include dashboard_url
         const waitRes = await client.callTool({
           name: "wait_task",
-          arguments: { job_id: dSc.jobId, wait_ms: 2_000 }
+          // Unknown legacy fields are stripped by the public schema and cannot enable event polling.
+          arguments: { job_id: dSc.jobId, wait_ms: 2_000, after_cursor: 0 }
         });
         const waitSc = waitRes.structuredContent as any;
         expect(waitSc.terminal).toBe(true);
+        expect(waitSc.events).toEqual([]);
         expect(waitSc.dashboard_url).toBeUndefined();
 
         // 4. agy_events (polling) does NOT include dashboard_url
@@ -838,6 +840,12 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
         });
         const insSc = inspectRes.structuredContent as any;
         expect(insSc.dashboard_url).toBeUndefined();
+
+        const statusRes = await client.callTool({ name: "agy_status", arguments: {} });
+        const statusSc = statusRes.structuredContent as any;
+        expect(statusSc.workers).toHaveLength(2);
+        expect(statusSc.workers.every((worker: any) => worker.recentStderr === undefined)).toBe(true);
+        expect((statusRes.content as any[])[0].text).toBe("2 legacy worker status record(s).");
       } finally {
         await client.close();
         await server.close();

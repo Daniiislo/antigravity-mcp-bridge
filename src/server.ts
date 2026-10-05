@@ -78,15 +78,14 @@ export function createServer(manager: WorkerManager): McpServer {
 
   server.registerTool("wait_task", {
     title: "Wait on Task",
-    description: "Bounded wait for a task to reach terminal state (completion, failure, or cancellation). OMIT after_cursor so the call blocks until the job finishes or reaches wait_ms without burning LLM turns on intermediate events. Calling wait_task without after_cursor is token-efficient and returns terminal=true when completed.",
+    description: "Bounded status-only wait for terminal state. Progress events are intentionally unavailable here; use the dashboard or agy_events outside LLM loops.",
     inputSchema: z.object({
       job_id: z.string().min(1).describe("Job ID to wait for"),
-      wait_ms: z.number().int().min(0).max(300_000).optional().describe("Bounded wait time in milliseconds (default 30000, max 300000). Set to 60000-120000 for long tasks."),
-      after_cursor: z.number().int().min(0).optional().describe("Deprecated for LLMs: Optional event cursor. DO NOT poll with this in agent loops as it causes rapid token exhaustion; omit this and wait for terminal state.")
+      wait_ms: z.number().int().min(0).max(300_000).optional().describe("Bounded wait time in milliseconds (default 30000, max 300000). Set to 60000-120000 for long tasks.")
     })
-  }, async ({ job_id, wait_ms, after_cursor }) => {
+  }, async ({ job_id, wait_ms }) => {
     try {
-      const result = await manager.waitTask(job_id, { waitMs: wait_ms, afterCursor: after_cursor });
+      const result = await manager.waitTask(job_id, { waitMs: wait_ms });
       return success(result, `Job ${result.job_id} status: ${result.status} (terminal: ${result.terminal}).`);
     } catch (error) {
       return failure(error);
@@ -306,11 +305,18 @@ export function createServer(manager: WorkerManager): McpServer {
 
   server.registerTool("agy_status", {
     title: "Antigravity worker status",
-    description: "Inspect worker state, conversation IDs, queued work, usage, and bounded stderr diagnostics.",
-    inputSchema: z.object({ role: optionalRoleSchema })
-  }, ({ role }) => {
+    description: "Inspect compact legacy worker status. Stderr diagnostics are opt-in and bounded.",
+    inputSchema: z.object({
+      role: optionalRoleSchema,
+      include_diagnostics: z.boolean().optional().describe("Include at most 2048 characters of recent stderr per worker (default false)")
+    })
+  }, ({ role, include_diagnostics }) => {
     const statuses = manager.status(role as Role | undefined);
-    return success({ workers: statuses }, JSON.stringify(statuses, null, 2));
+    const workers = statuses.map(({ recentStderr, ...status }) => ({
+      ...status,
+      ...(include_diagnostics && recentStderr ? { recentStderr: recentStderr.slice(-2_048) } : {})
+    }));
+    return success({ workers }, `${workers.length} legacy worker status record(s).`);
   });
 
   server.registerTool("agy_stop", {
