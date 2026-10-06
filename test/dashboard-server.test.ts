@@ -821,7 +821,7 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
         });
         const waitSc = waitRes.structuredContent as any;
         expect(waitSc.terminal).toBe(true);
-        expect(waitSc.events).toEqual([]);
+        expect(waitSc.events).toBeUndefined();
         expect(waitSc.dashboard_url).toBeUndefined();
 
         // 4. agy_events (polling) does NOT include dashboard_url

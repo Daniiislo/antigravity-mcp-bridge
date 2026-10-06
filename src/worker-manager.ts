@@ -84,6 +84,8 @@ export interface WaitTaskResult {
   events: NormalizedEvent[];
 }
 
+export type TerminalTaskResult = InspectTaskResult & { terminal: true };
+
 export interface InspectTaskOptions {
   includePrompt?: boolean | undefined;
   includeSteps?: boolean | undefined;
@@ -341,6 +343,58 @@ export class WorkerManager {
       cursor: eventsRes?.latest_cursor ?? this.eventStore.latestCursor,
       events: eventsRes?.events ?? []
     };
+  }
+
+  async waitTaskUntilTerminal(jobId: string, options?: { signal?: AbortSignal | undefined }): Promise<TerminalTaskResult> {
+    const job = this.jobs.get(jobId);
+    if (!job) {
+      const persisted = this.eventStore.readDiskJob(jobId);
+      if (!persisted) throw new Error(`Job not found: ${jobId}`);
+      if (persisted.status === "queued" || persisted.status === "running") {
+        throw new Error(`ORPHANED_JOB: ${jobId} was ${persisted.status} when the bridge stopped and cannot be resumed safely`);
+      }
+      return { ...this.inspectTask(jobId), terminal: true };
+    }
+
+    const isTerminal = () => job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
+    const signal = options?.signal;
+    if (signal?.aborted) throw this.waitAbortedError(jobId);
+
+    if (!isTerminal()) {
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+          this.eventStore.off("event", onEvent);
+          signal?.removeEventListener("abort", onAbort);
+        };
+        const finish = (callback: () => void) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          callback();
+        };
+        const onEvent = (evt: NormalizedEvent) => {
+          if (evt.jobId === jobId && isTerminal()) finish(resolve);
+        };
+        const onAbort = () => finish(() => reject(this.waitAbortedError(jobId)));
+
+        this.eventStore.on("event", onEvent);
+        signal?.addEventListener("abort", onAbort, { once: true });
+
+        // Close the check/register race if the job completed immediately
+        // before the listener was attached.
+        if (isTerminal()) finish(resolve);
+        else if (signal?.aborted) onAbort();
+      });
+    }
+
+    return { ...this.inspectTask(jobId), terminal: true };
+  }
+
+  private waitAbortedError(jobId: string): Error {
+    const error = new Error(`Wait canceled by caller for job ${jobId}; the job was not canceled`);
+    error.name = "AbortError";
+    return error;
   }
 
   inspectTask(jobId: string, options: InspectTaskOptions = {}): InspectTaskResult {

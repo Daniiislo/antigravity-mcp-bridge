@@ -78,16 +78,14 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
 
   server.registerTool("wait_task", {
     title: "Wait on Task",
-    description: "Bounded status-only wait for terminal state. Waits up to 300 seconds per call. If the job is still running, call wait_task again; never inspect events, status, or dashboard merely because time elapsed.",
+    description: "Wait in one pending call until the task reaches a terminal state, then return its compact result. Do not poll or call inspect_task afterward. The host MCP tool timeout must exceed the intended task duration.",
     inputSchema: z.object({
       job_id: z.string().min(1).describe("Job ID to wait for")
     })
-  }, async ({ job_id }) => {
+  }, async ({ job_id }, context) => {
     try {
-      const result = await manager.waitTask(job_id);
-      const summary = result.terminal
-        ? `Job ${result.job_id} status: ${result.status} (terminal: true).`
-        : `Job ${result.job_id} is running (terminal: false). Call wait_task again; do not inspect events, status, or dashboard.`;
+      const result = await manager.waitTaskUntilTerminal(job_id, { signal: context.mcpReq.signal });
+      const summary = `Job ${result.job_id} finished with status ${result.status}. Compact result included; do not call inspect_task unless diagnostics are needed.`;
       return success(result, summary);
     } catch (error) {
       return failure(error);

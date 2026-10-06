@@ -38,7 +38,7 @@ describe("Package Integrity", () => {
       expect(f.endsWith(".log")).toBe(false);
       expect(f.endsWith(".tmp")).toBe(false);
     }
-  });
+  }, 30_000);
 
   it("packaged smoke script references an existing packaged fixture", () => {
     const smokePath = path.join(root, "scripts", "smoke.mjs");

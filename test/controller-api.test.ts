@@ -144,6 +144,92 @@ describe("Controller API (Tasks 5-7)", () => {
       expect(waited.events).toEqual([]);
     });
 
+    it("waitTaskUntilTerminal holds one waiter and returns the compact result", async () => {
+      const { mgr } = makeManager();
+      const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
+      const job = await mgr.dispatchTask(worker.workerId, "DELAY:150:single-pending");
+
+      const result = await mgr.waitTaskUntilTerminal(job.jobId);
+
+      expect(result.terminal).toBe(true);
+      expect(result.status).toBe("succeeded");
+      expect(result.result).toContain("reply:single-pending:accept-edits");
+      expect(result).not.toHaveProperty("events");
+    });
+
+    it("aborting a terminal waiter removes its listener without canceling the job", async () => {
+      const { mgr } = makeManager();
+      const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
+      const job = await mgr.dispatchTask(worker.workerId, "DELAY:250:survives-abort");
+      const controller = new AbortController();
+      const store = (mgr as any).eventStore;
+      const baseline = store.listenerCount("event");
+
+      const pending = mgr.waitTaskUntilTerminal(job.jobId, { signal: controller.signal });
+      expect(store.listenerCount("event")).toBe(baseline + 1);
+      controller.abort();
+
+      await expect(pending).rejects.toThrow(/job was not canceled/i);
+      expect(store.listenerCount("event")).toBe(baseline);
+      const completed = await mgr.waitTaskUntilTerminal(job.jobId);
+      expect(completed.status).toBe("succeeded");
+      expect(completed.result).toContain("survives-abort");
+    });
+
+    it("resolves concurrent terminal waiters once without leaking listeners", async () => {
+      const { mgr } = makeManager();
+      const worker = await mgr.createWorker({ role: "tester", workspace: process.cwd() });
+      const job = await mgr.dispatchTask(worker.workerId, "DELAY:150:two-waiters");
+      const store = (mgr as any).eventStore;
+      const baseline = store.listenerCount("event");
+
+      const [first, second] = await Promise.all([
+        mgr.waitTaskUntilTerminal(job.jobId),
+        mgr.waitTaskUntilTerminal(job.jobId)
+      ]);
+
+      expect(first.status).toBe("succeeded");
+      expect(second.status).toBe("succeeded");
+      expect(store.listenerCount("event")).toBe(baseline);
+    });
+
+    it("wakes the terminal waiter with compact failure details", async () => {
+      const { mgr } = makeManager();
+      const worker = await mgr.createWorker({ role: "tester", workspace: process.cwd() });
+      const job = await mgr.dispatchTask(worker.workerId, "ERROR");
+
+      const result = await mgr.waitTaskUntilTerminal(job.jobId);
+
+      expect(result.status).toBe("failed");
+      expect(result.error).toContain("fake failure");
+      expect(result.terminal).toBe(true);
+    });
+
+    it("wakes the terminal waiter when the job is canceled", async () => {
+      const { mgr } = makeManager();
+      const worker = await mgr.createWorker({ role: "tester", workspace: process.cwd() });
+      const job = await mgr.dispatchTask(worker.workerId, "HANG");
+      const pending = mgr.waitTaskUntilTerminal(job.jobId);
+
+      await mgr.cancelTask(job.jobId);
+      const result = await pending;
+
+      expect(result.status).toBe("canceled");
+      expect(result.terminal).toBe(true);
+    });
+
+    it("rejects persisted nonterminal jobs as orphaned after restart", async () => {
+      const { mgr: mgr1, runsDir } = makeManager({ defaultTimeoutMs: 2_000 });
+      const worker = await mgr1.createWorker({ role: "tester", workspace: process.cwd() });
+      const job = await mgr1.dispatchTask(worker.workerId, "DELAY:750:orphaned");
+      const config = (mgr1 as any).config as BridgeConfig;
+      const mgr2 = new WorkerManager(config, [fixture], { runsDir });
+      managers.push(mgr2);
+
+      await expect(mgr2.waitTaskUntilTerminal(job.jobId)).rejects.toThrow(/ORPHANED_JOB/);
+      await mgr1.waitTaskUntilTerminal(job.jobId);
+    });
+
     it("wait_task falls back to persisted disk job if in-memory job is not found", async () => {
       const runsDir = mkdtempSync(path.join(tmpdir(), "wait-disk-"));
       tempDirs.push(runsDir);
@@ -701,7 +787,7 @@ describe("Controller API (Tasks 5-7)", () => {
   });
 
   describe("public MCP wait_task interface", () => {
-    it("strips legacy wait_ms and after_cursor, does not short-poll, and returns terminal true with empty events", async () => {
+    it("strips legacy polling arguments, waits once, and returns the compact terminal result", async () => {
       const { mgr } = makeManager();
       const server = createServer(mgr);
       const [t1, t2] = InMemoryTransport.createLinkedPair();
@@ -734,11 +820,12 @@ describe("Controller API (Tasks 5-7)", () => {
         const structured = res.structuredContent as any;
         expect(structured.terminal).toBe(true);
         expect(structured.status).toBe("succeeded");
-        expect(structured.events).toEqual([]);
+        expect(structured.result).toContain("reply:mcp-wait:accept-edits");
+        expect(structured.events).toBeUndefined();
 
         // Non-terminal summary format check vs terminal summary format check
         const textContent = (res.content as Array<any>)[0].text;
-        expect(textContent).toBe(`Job ${job.jobId} status: succeeded (terminal: true).`);
+        expect(textContent).toBe(`Job ${job.jobId} finished with status succeeded. Compact result included; do not call inspect_task unless diagnostics are needed.`);
       } finally {
         await client.close();
         await server.close();

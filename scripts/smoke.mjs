@@ -60,7 +60,7 @@ try {
     throw new Error(`list_models failed: ${JSON.stringify(modelsRes)}`);
   }
 
-  // 3. Controller lifecycle: create_worker -> dispatch_task -> wait_task -> inspect_task -> close_worker
+  // 3. Controller lifecycle: create_worker -> dispatch_task -> one terminal wait -> close_worker
   const workerRes = await client.callTool({
     name: "create_worker",
     arguments: {
@@ -93,16 +93,13 @@ try {
       wait_ms: 5000
     }
   });
-  if (waitRes.isError || !waitRes.structuredContent?.terminal) {
+  if (
+    waitRes.isError ||
+    !waitRes.structuredContent?.terminal ||
+    waitRes.structuredContent?.status !== "succeeded" ||
+    !String(waitRes.structuredContent?.result ?? "").includes("smoke test async task")
+  ) {
     throw new Error(`wait_task failed: ${JSON.stringify(waitRes)}`);
-  }
-
-  const inspectRes = await client.callTool({
-    name: "inspect_task",
-    arguments: { job_id: jobId }
-  });
-  if (inspectRes.isError || inspectRes.structuredContent?.status !== "succeeded") {
-    throw new Error(`inspect_task failed: ${JSON.stringify(inspectRes)}`);
   }
 
   const closeRes = await client.callTool({
@@ -140,7 +137,7 @@ try {
     throw new Error(`delete_task failed: ${JSON.stringify(delRes)}`);
   }
 
-  process.stdout.write("MCP smoke test passed: all 17 tools verified, async worker lifecycle (create/dispatch/wait/inspect/close), open_dashboard, and delete_task completed.\n");
+  process.stdout.write("MCP smoke test passed: all 17 tools verified, async worker lifecycle (create/dispatch/single-wait/close), open_dashboard, and delete_task completed.\n");
 } finally {
   await client.close();
 }
