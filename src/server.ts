@@ -62,14 +62,28 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
 
   server.registerTool("dispatch_task", {
     title: "Dispatch Task",
-    description: "Enqueue a task on a worker and return immediately with a job ID.",
+    description: "Enqueue a task with inactivity and absolute duration limits. Returns an MCP Task when negotiated, otherwise a job ID immediately.",
     inputSchema: z.object({
       worker_id: z.string().min(1).describe("Target worker ID"),
-      brief: z.string().min(1).describe("Task brief to enqueue")
+      brief: z.string().min(1).describe("Task brief to enqueue"),
+      timeout_seconds: z.number().positive().max(86_400).optional()
+        .describe("Deprecated alias for inactivity_timeout_seconds"),
+      inactivity_timeout_seconds: z.number().positive().max(86_400).optional()
+        .describe("Time without a meaningful progress event before termination"),
+      max_duration_seconds: z.number().positive().max(86_400).optional()
+        .describe("Absolute wall-clock safety cap even while progress continues")
     })
-  }, async ({ worker_id, brief }) => {
+  }, async ({ worker_id, brief, timeout_seconds, inactivity_timeout_seconds, max_duration_seconds }) => {
     try {
-      const result = await manager.dispatchTask(worker_id, brief);
+      if (timeout_seconds !== undefined && inactivity_timeout_seconds !== undefined) {
+        throw new Error("Use either timeout_seconds or inactivity_timeout_seconds, not both");
+      }
+      const result = await manager.dispatchTask(
+        worker_id,
+        brief,
+        inactivity_timeout_seconds ?? timeout_seconds,
+        max_duration_seconds
+      );
       return success(result, `Dispatched task ${result.jobId} to worker ${result.workerId} (status: ${result.status}).`);
     } catch (error) {
       return failure(error);
@@ -78,14 +92,21 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
 
   server.registerTool("wait_task", {
     title: "Wait on Task",
-    description: "Wait in one pending call until the task reaches a terminal state, then return its compact result. Do not poll or call inspect_task afterward. The host MCP tool timeout must exceed the intended task duration.",
+    description: "Wait for completion or one bounded heartbeat interval. A non-terminal response includes compact progress and the job keeps running; call again after updating the user.",
     inputSchema: z.object({
-      job_id: z.string().min(1).describe("Job ID to wait for")
+      job_id: z.string().min(1).describe("Job ID to wait for"),
+      wait_seconds: z.number().positive().max(60).optional()
+        .describe("Heartbeat interval before returning a running snapshot; defaults to 55 seconds")
     })
-  }, async ({ job_id }, context) => {
+  }, async ({ job_id, wait_seconds }, context) => {
     try {
-      const result = await manager.waitTaskUntilTerminal(job_id, { signal: context.mcpReq.signal });
-      const summary = `Job ${result.job_id} finished with status ${result.status}. Compact result included; do not call inspect_task unless diagnostics are needed.`;
+      const result = await manager.waitTaskHeartbeat(job_id, {
+        waitMs: (wait_seconds ?? 55) * 1_000,
+        signal: context.mcpReq.signal
+      });
+      const summary = result.terminal
+        ? `Job ${result.job_id} finished with status ${result.status}. Compact result included.`
+        : `Job ${result.job_id} is still running after ${result.elapsed_seconds.toFixed(1)}s. ${result.last_progress ? `Latest progress: ${result.last_progress}` : "No progress event has been emitted yet."}`;
       return success(result, summary);
     } catch (error) {
       return failure(error);
@@ -97,11 +118,25 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
     description: "Enqueue related work in the same worker conversation and return immediately.",
     inputSchema: z.object({
       worker_id: z.string().min(1).describe("Target worker ID"),
-      finding: z.string().min(1).describe("Follow-up finding or task in the existing conversation")
+      finding: z.string().min(1).describe("Follow-up finding or task in the existing conversation"),
+      timeout_seconds: z.number().positive().max(86_400).optional()
+        .describe("Deprecated alias for inactivity_timeout_seconds"),
+      inactivity_timeout_seconds: z.number().positive().max(86_400).optional()
+        .describe("Time without a meaningful progress event before termination"),
+      max_duration_seconds: z.number().positive().max(86_400).optional()
+        .describe("Absolute wall-clock safety cap even while progress continues")
     })
-  }, async ({ worker_id, finding }) => {
+  }, async ({ worker_id, finding, timeout_seconds, inactivity_timeout_seconds, max_duration_seconds }) => {
     try {
-      const result = await manager.sendFollowup(worker_id, finding);
+      if (timeout_seconds !== undefined && inactivity_timeout_seconds !== undefined) {
+        throw new Error("Use either timeout_seconds or inactivity_timeout_seconds, not both");
+      }
+      const result = await manager.sendFollowup(
+        worker_id,
+        finding,
+        inactivity_timeout_seconds ?? timeout_seconds,
+        max_duration_seconds
+      );
       return success(result, `Enqueued follow-up ${result.jobId} on worker ${result.workerId}.`);
     } catch (error) {
       return failure(error);
@@ -292,11 +327,14 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
       role: roleSchema.describe("Implementer may edit; tester is started in plan mode"),
       task: z.string().min(1).describe("Decision-complete task or review brief"),
       cwd: z.string().min(1).describe("Existing workspace directory inside AGY_ALLOWED_ROOTS"),
-      timeoutSeconds: z.number().int().positive().max(86_400).optional()
+      timeoutSeconds: z.number().positive().max(86_400).optional()
+        .describe("Inactivity timeout in seconds"),
+      maxDurationSeconds: z.number().positive().max(86_400).optional()
+        .describe("Absolute wall-clock safety cap in seconds")
     })
-  }, async ({ role, task, cwd, timeoutSeconds }) => {
+  }, async ({ role, task, cwd, timeoutSeconds, maxDurationSeconds }) => {
     try {
-      const result = await manager.delegate(role, task, cwd, timeoutSeconds);
+      const result = await manager.delegate(role, task, cwd, timeoutSeconds, maxDurationSeconds);
       return success(result, result.response);
     } catch (error) {
       return failure(error);

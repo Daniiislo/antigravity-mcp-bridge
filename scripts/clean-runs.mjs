@@ -2,12 +2,8 @@
 import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { fileURLToPath } from "node:url";
 import { loadConfig } from "../dist/config.js";
 import { EventStore } from "../dist/event-store.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(__dirname, "..");
 
 const args = process.argv.slice(2);
 
@@ -88,7 +84,7 @@ if (all) {
 }
 
 const config = loadConfig(process.env);
-const runsDir = config.runsDir || path.join(root, ".antigravity-bridge", "runs");
+const runsDir = config.runsDir;
 const eventStore = new EventStore({ runsDir });
 
 const allRuns = await eventStore.readDiskHistory({ limit: 100_000 });

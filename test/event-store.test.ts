@@ -179,6 +179,45 @@ describe("EventStore", () => {
     expect(store2.readDiskJob("nonexistent-job")).toBeUndefined();
   });
 
+  it("does not relabel cumulative usage as a per-turn delta when a modern run omits the delta", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "event-store-"));
+    created.push(dir);
+    const store = new EventStore({ runsDir: dir });
+    const usage = {
+      input_tokens: 7,
+      output_tokens: 3,
+      thinking_tokens: 0,
+      cache_read_tokens: 11,
+      total_tokens: 10
+    };
+
+    store.recordEvent({
+      eventType: "lifecycle",
+      workerId: "w1",
+      jobId: "job-unknown-delta",
+      data: { lifecycle: "queued", role: "implementer", workspace: dir, brief: "resume", created_at: new Date().toISOString() }
+    });
+    store.recordEvent({
+      eventType: "result",
+      workerId: "w1",
+      jobId: "job-unknown-delta",
+      data: { status: "SUCCESS", response: "resumed", duration_seconds: 12, usage }
+    });
+    store.recordEvent({
+      eventType: "lifecycle",
+      workerId: "w1",
+      jobId: "job-unknown-delta",
+      data: { lifecycle: "succeeded", response: "resumed", duration_seconds: 2, cumulative_usage: usage }
+    });
+
+    const diskJob = store.readDiskJob("job-unknown-delta");
+    expect(diskJob?.usage).toBeUndefined();
+    expect(diskJob?.cumulative_usage).toEqual(usage);
+    const [history] = await store.readDiskHistory();
+    expect(history?.usage).toBeUndefined();
+    expect(history?.cumulative_usage).toEqual(usage);
+  });
+
   it("deleteJob deletes run file from disk, purges memory events, and rejects traversal", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "event-store-"));
     created.push(dir);

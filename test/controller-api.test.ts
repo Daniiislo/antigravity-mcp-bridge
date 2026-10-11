@@ -70,6 +70,27 @@ describe("Controller API (Tasks 5-7)", () => {
   });
 
   describe("dispatch_task and wait_task", () => {
+    it("allows a job-specific timeout to override the worker default", async () => {
+      const { mgr } = makeManager({ defaultTimeoutMs: 30 });
+      const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
+
+      const job = await mgr.dispatchTask(worker.workerId, "DELAY:80:per-job-timeout", 1);
+      const result = await mgr.waitTaskUntilTerminal(job.jobId);
+
+      expect(result.status).toBe("succeeded");
+      expect(result.result).toContain("per-job-timeout");
+    });
+
+    it("rejects incompatible effective inactivity and absolute limits before enqueueing", async () => {
+      const { mgr } = makeManager({ defaultTimeoutMs: 5_000, maxTurnTimeoutMs: 10_000 });
+      const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
+
+      await expect(mgr.dispatchTask(worker.workerId, "never queued", 20))
+        .rejects.toThrow(/maximum duration.*inactivity/i);
+      await expect(mgr.dispatchTask(worker.workerId, "never queued", undefined, 2))
+        .rejects.toThrow(/maximum duration.*inactivity/i);
+    });
+
     it("dispatches immediately and returns job_id before completion, then wait_task resolves", async () => {
       const { mgr } = makeManager();
       const worker = await mgr.createWorker({
@@ -89,6 +110,36 @@ describe("Controller API (Tasks 5-7)", () => {
       expect(waited).not.toHaveProperty("result");
       expect(waited).not.toHaveProperty("error");
       expect(mgr.inspectTask(job.jobId).result).toContain("reply:async-test:accept-edits");
+    });
+
+    it("uses inactivity and absolute timeouts independently and records the timeout kind", async () => {
+      const { mgr } = makeManager();
+      const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
+
+      const inactivityJob = await mgr.dispatchTask(worker.workerId, "HANG", 0.15, 1);
+      const inactivity = await mgr.waitTaskUntilTerminal(inactivityJob.jobId);
+      expect(inactivity.status).toBe("failed");
+      expect(inactivity.timeout_kind).toBe("inactivity");
+
+      const maxJob = await mgr.dispatchTask(worker.workerId, "PROGRESS_DELAY:20:100:max-cap", 0.5, 0.65);
+      const maxDuration = await mgr.waitTaskUntilTerminal(maxJob.jobId);
+      expect(maxDuration.status).toBe("failed");
+      expect(maxDuration.timeout_kind).toBe("max_duration");
+    });
+
+    it("returns a bounded heartbeat snapshot without canceling a running job", async () => {
+      const { mgr } = makeManager();
+      const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
+      const job = await mgr.dispatchTask(worker.workerId, "DELAY:250:heartbeat");
+
+      const heartbeat = await mgr.waitTaskHeartbeat(job.jobId, { waitMs: 40 });
+      expect(heartbeat.terminal).toBe(false);
+      expect(heartbeat.status).toBe("running");
+      expect(heartbeat.elapsed_seconds).toBeGreaterThan(0);
+
+      const terminal = await mgr.waitTaskHeartbeat(job.jobId, { waitMs: 2_000 });
+      expect(terminal.terminal).toBe(true);
+      expect(terminal.result).toContain("heartbeat");
     });
 
     it("prepends worker constraints to dispatched task prompt", async () => {
@@ -304,6 +355,9 @@ describe("Controller API (Tasks 5-7)", () => {
       expect(inspected.response_char_budget).toBe(32_768);
       expect(inspected.denied_actions.length).toBeGreaterThan(0);
       expect(inspected.usage).toBeDefined();
+      expect(inspected.cumulative_usage).toBeDefined();
+      expect(inspected.cli_duration_seconds).toBeDefined();
+      expect(inspected.last_activity_at).toBeDefined();
       expect(inspected.result).toBe("handled denial");
     });
 
@@ -347,10 +401,12 @@ describe("Controller API (Tasks 5-7)", () => {
       expect(afterRestart.started_at).toBeDefined();
       expect(afterRestart.finished_at).toBeDefined();
       expect(afterRestart.duration_seconds).toBeDefined();
+      expect(afterRestart.cli_duration_seconds).toBeDefined();
       expect(afterRestart.conversation_id).toBe(beforeRestart.conversation_id);
       expect(afterRestart.step_events!.length).toBe(beforeRestart.step_events!.length);
       expect(afterRestart.denied_actions).toEqual(beforeRestart.denied_actions);
       expect(afterRestart.usage).toBeDefined();
+      expect(afterRestart.cumulative_usage).toBeDefined();
       expect(afterRestart.result).toBe("handled denial");
     });
 
@@ -787,7 +843,7 @@ describe("Controller API (Tasks 5-7)", () => {
   });
 
   describe("public MCP wait_task interface", () => {
-    it("strips legacy polling arguments, waits once, and returns the compact terminal result", async () => {
+    it("returns bounded heartbeats for long work and a compact terminal result on the next wait", async () => {
       const { mgr } = makeManager();
       const server = createServer(mgr);
       const [t1, t2] = InMemoryTransport.createLinkedPair();
@@ -802,30 +858,34 @@ describe("Controller API (Tasks 5-7)", () => {
         const job = await mgr.dispatchTask(worker.workerId, "DELAY:250:mcp-wait");
 
         const start = Date.now();
-        // Pass legacy wait_ms: 0 and after_cursor: 0
-        const res = await client.callTool({
+        const heartbeat = await client.callTool({
           name: "wait_task",
           arguments: {
             job_id: job.jobId,
-            wait_ms: 0,
-            after_cursor: 0
+            wait_seconds: 0.05
           }
         });
         const elapsed = Date.now() - start;
 
-        expect(res.isError).toBeFalsy();
-        // Must not return immediately (proves wait_ms: 0 was stripped and didn't short-poll)
-        expect(elapsed).toBeGreaterThanOrEqual(200);
+        expect(heartbeat.isError).toBeFalsy();
+        expect(elapsed).toBeGreaterThanOrEqual(40);
+        const heartbeatStructured = heartbeat.structuredContent as any;
+        expect(heartbeatStructured.terminal).toBe(false);
+        expect(heartbeatStructured.status).toBe("running");
+        expect((heartbeat.content as Array<any>)[0].text).toContain("still running");
 
+        const res = await client.callTool({
+          name: "wait_task",
+          arguments: { job_id: job.jobId, wait_seconds: 1 }
+        });
         const structured = res.structuredContent as any;
         expect(structured.terminal).toBe(true);
         expect(structured.status).toBe("succeeded");
         expect(structured.result).toContain("reply:mcp-wait:accept-edits");
         expect(structured.events).toBeUndefined();
 
-        // Non-terminal summary format check vs terminal summary format check
         const textContent = (res.content as Array<any>)[0].text;
-        expect(textContent).toBe(`Job ${job.jobId} finished with status succeeded. Compact result included; do not call inspect_task unless diagnostics are needed.`);
+        expect(textContent).toBe(`Job ${job.jobId} finished with status succeeded. Compact result included.`);
       } finally {
         await client.close();
         await server.close();

@@ -467,6 +467,43 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
       expect(snap.latest_cursor).toBeGreaterThan(0);
     });
 
+    it("loads shared history from multiple workspaces for the project filter", async () => {
+      const { mgr, runsDir } = makeManager();
+      const createdAt = new Date().toISOString();
+      const workspaces = [path.join(tmpdir(), "ProjectAlpha"), path.join(tmpdir(), "ProjectBeta")];
+
+      for (let index = 0; index < workspaces.length; index++) {
+        const jobId = `job-shared-workspace-${index + 1}`;
+        writeFileSync(path.join(runsDir, `${jobId}.ndjson`), JSON.stringify({
+          cursor: 1,
+          timestamp: createdAt,
+          eventType: "lifecycle",
+          workerId: `worker-shared-${index + 1}`,
+          jobId,
+          data: {
+            lifecycle: "queued",
+            role: "implementer",
+            workspace: workspaces[index],
+            brief: `shared workspace ${index + 1}`
+          }
+        }) + "\n", "utf8");
+      }
+
+      await mgr.getDashboardUrl();
+      const ds = mgr.getDashboardServer()!;
+      const port = ds.getPort()!;
+
+      const snapRes = await request({ port, path: `/${ds.token}/api/snapshot` });
+      expect(snapRes.statusCode).toBe(200);
+      const snap = JSON.parse(snapRes.body);
+      expect(snap.jobs.map((job: { workspace: string }) => job.workspace).sort())
+        .toEqual([...workspaces].sort());
+
+      const htmlRes = await request({ port, path: `/${ds.token}/` });
+      expect(htmlRes.body).toContain("if (project && job.workspace !== project) continue;");
+      expect(htmlRes.body).toContain('const qProject = params.get("project") || params.get("workspace");');
+    });
+
     it("streams live SSE events and supports reconnect cursor without duplicate delivery", async () => {
       const { mgr } = makeManager();
       const worker = await mgr.createWorker({ role: "tester", workspace: process.cwd() });

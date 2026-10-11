@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import readline from "node:readline";
 
 const args = process.argv.slice(2);
@@ -25,7 +27,9 @@ if (args.includes("models")) {
 }
 
 const mode = args[args.indexOf("--mode") + 1] ?? "unknown";
-const conversationId = `fake-${mode}-${process.pid}`;
+const conversationArgIndex = args.indexOf("--conversation");
+const resumedConversationId = conversationArgIndex >= 0 ? args[conversationArgIndex + 1] : undefined;
+const conversationId = resumedConversationId || `fake-${mode}-${process.pid}`;
 let turns = 0;
 
 process.stdout.write(JSON.stringify({ event: "init", conversation_id: conversationId, init: { cwd: process.cwd(), tools: [] } }) + "\n");
@@ -56,6 +60,16 @@ input.on("line", (line) => {
   }
   if (content === "EXIT") process.exit(17);
   if (content === "HANG") return;
+  if (typeof content === "string" && content.startsWith("SPAWN_CHILD_HANG:")) {
+    const pidFile = content.slice("SPAWN_CHILD_HANG:".length);
+    const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 10_000)"], {
+      detached: false,
+      stdio: "ignore",
+      windowsHide: true
+    });
+    writeFileSync(pidFile, String(descendant.pid), "utf8");
+    return;
+  }
   if (content === "ERROR") {
     process.stdout.write(JSON.stringify({ event: "result", result: {
       conversation_id: conversationId, status: "ERROR", response: "", error: "fake failure",
@@ -118,21 +132,44 @@ input.on("line", (line) => {
     } }) + "\n");
     return;
   }
-  if (typeof content === "string" && content.includes("DELAY:")) {
-    const match = content.match(/DELAY:(\d+):(.*)/s);
-    const delayMs = match ? Number(match[1]) : 50;
-    const actualMsg = match ? match[2] : "delayed";
-    setTimeout(() => {
-      process.stderr.write(`diagnostic:${content}\n`);
+  if (typeof content === "string" && !content.startsWith("PROGRESS_DELAY:")) {
+    const match = content.match(/(?:^|\n)DELAY:(\d+):(.*)/s);
+    if (match) {
+      const delayMs = Number(match[1]);
+      const actualMsg = match[2];
+      setTimeout(() => {
+        process.stderr.write(`diagnostic:${content}\n`);
+        process.stdout.write(JSON.stringify({ event: "step_update", step_update: {
+          conversation_id: conversationId, step_index: turns, state: "DONE", step_type: "agent_response", text_delta: `reply:${actualMsg}`
+        } }) + "\n");
+        process.stdout.write(JSON.stringify({ event: "result", result: {
+          conversation_id: conversationId, status: "SUCCESS", response: `reply:${actualMsg}:${mode}`,
+          duration_seconds: turns * 0.01, num_turns: turns,
+          usage: { input_tokens: turns, output_tokens: turns, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: turns * 2 }
+        } }) + "\n");
+      }, delayMs);
+      return;
+    }
+  }
+  if (typeof content === "string" && content.startsWith("PROGRESS_DELAY:")) {
+    const match = content.match(/^PROGRESS_DELAY:(\d+):(\d+):(.*)$/s);
+    const count = match ? Number(match[1]) : 3;
+    const intervalMs = match ? Number(match[2]) : 25;
+    const actualMsg = match ? match[3] : "progressed";
+    let emitted = 0;
+    const interval = setInterval(() => {
+      emitted += 1;
       process.stdout.write(JSON.stringify({ event: "step_update", step_update: {
-        conversation_id: conversationId, step_index: turns, state: "DONE", step_type: "agent_response", text_delta: `reply:${actualMsg}`
+        conversation_id: conversationId, step_index: emitted, state: "RUNNING", step_type: "tool_use", text_delta: `progress ${emitted}`
       } }) + "\n");
+      if (emitted < count) return;
+      clearInterval(interval);
       process.stdout.write(JSON.stringify({ event: "result", result: {
         conversation_id: conversationId, status: "SUCCESS", response: `reply:${actualMsg}:${mode}`,
-        duration_seconds: turns * 0.01, num_turns: turns,
+        duration_seconds: turns * intervalMs / 1_000, num_turns: turns,
         usage: { input_tokens: turns, output_tokens: turns, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: turns * 2 }
       } }) + "\n");
-    }, delayMs);
+    }, intervalMs);
     return;
   }
   if (typeof content === "string" && content.includes("MANY_STEPS:")) {

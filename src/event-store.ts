@@ -149,7 +149,10 @@ export interface JobHistorySummary {
   started_at?: string | undefined;
   finished_at?: string | undefined;
   duration_seconds?: number | undefined;
+  cli_duration_seconds?: number | undefined;
   usage?: AgyUsage | undefined;
+  cumulative_usage?: AgyUsage | undefined;
+  timeout_kind?: "inactivity" | "max_duration" | undefined;
   result?: string | undefined;
   error?: string | undefined;
 }
@@ -267,7 +270,11 @@ export class EventStore extends EventEmitter {
         let startedAt: string | undefined;
         let finishedAt: string | undefined;
         let durationSeconds: number | undefined;
+        let cliDurationSeconds: number | undefined;
         let usage: AgyUsage | undefined;
+        let cumulativeUsage: AgyUsage | undefined;
+        let hasModernCumulativeUsage = false;
+        let timeoutKind: "inactivity" | "max_duration" | undefined;
         let result: string | undefined;
         let error: string | undefined;
 
@@ -295,12 +302,19 @@ export class EventStore extends EventEmitter {
                 status = "succeeded";
                 finishedAt = (d.finished_at as string) || evt.timestamp;
                 if (typeof d.duration_seconds === "number") durationSeconds = d.duration_seconds;
+                if (typeof d.cli_duration_seconds === "number") cliDurationSeconds = d.cli_duration_seconds;
                 if (typeof d.response === "string") result = d.response;
                 if (d.usage) usage = d.usage as AgyUsage;
+                if (d.cumulative_usage) {
+                  cumulativeUsage = d.cumulative_usage as AgyUsage;
+                  hasModernCumulativeUsage = true;
+                }
               } else if (state === "failed") {
                 status = "failed";
                 finishedAt = (d.finished_at as string) || evt.timestamp;
                 if (typeof d.error === "string") error = d.error;
+                if (typeof d.duration_seconds === "number") durationSeconds = d.duration_seconds;
+                if (d.timeout_kind === "inactivity" || d.timeout_kind === "max_duration") timeoutKind = d.timeout_kind;
               } else if (state === "canceled") {
                 status = "canceled";
                 finishedAt = (d.finished_at as string) || evt.timestamp;
@@ -315,13 +329,21 @@ export class EventStore extends EventEmitter {
                 if (typeof d.error === "string") error = d.error;
               }
               finishedAt = evt.timestamp || new Date().toISOString();
-              if (typeof d.duration_seconds === "number") durationSeconds = d.duration_seconds;
-              if (d.usage) usage = d.usage as AgyUsage;
+              if (typeof d.duration_seconds === "number") cliDurationSeconds = d.duration_seconds;
+              if (d.usage) cumulativeUsage = d.usage as AgyUsage;
             }
           } catch {
             // Ignore malformed line
           }
         }
+
+        if (durationSeconds === undefined && startedAt && finishedAt) {
+          durationSeconds = Math.max(0, (Date.parse(finishedAt) - Date.parse(startedAt)) / 1_000);
+        } else if (durationSeconds === undefined && cliDurationSeconds !== undefined) {
+          // Legacy run files stored only the CLI-reported duration.
+          durationSeconds = cliDurationSeconds;
+        }
+        if (!usage && cumulativeUsage && !hasModernCumulativeUsage) usage = cumulativeUsage;
 
         if (jobId) {
           summaries.push({
@@ -335,7 +357,10 @@ export class EventStore extends EventEmitter {
             ...(startedAt ? { started_at: startedAt } : {}),
             ...(finishedAt ? { finished_at: finishedAt } : {}),
             ...(durationSeconds !== undefined ? { duration_seconds: durationSeconds } : {}),
+            ...(cliDurationSeconds !== undefined ? { cli_duration_seconds: cliDurationSeconds } : {}),
             ...(usage ? { usage } : {}),
+            ...(cumulativeUsage ? { cumulative_usage: cumulativeUsage } : {}),
+            ...(timeoutKind ? { timeout_kind: timeoutKind } : {}),
             ...(result ? { result } : {}),
             ...(error ? { error } : {})
           });
@@ -458,7 +483,13 @@ export class EventStore extends EventEmitter {
     started_at?: string | undefined;
     finished_at?: string | undefined;
     duration_seconds?: number | undefined;
+    cli_duration_seconds?: number | undefined;
+    inactivity_timeout_seconds?: number | undefined;
+    max_duration_seconds?: number | undefined;
     conversation_id?: string | undefined;
+    timeout_kind?: "inactivity" | "max_duration" | undefined;
+    last_activity_at?: string | undefined;
+    last_progress?: string | undefined;
     total_steps: number;
     step_offset: number;
     step_limit: number;
@@ -473,6 +504,7 @@ export class EventStore extends EventEmitter {
     denied_actions: string[];
     has_more_denied_actions: boolean;
     usage?: AgyUsage | undefined;
+    cumulative_usage?: AgyUsage | undefined;
     result?: string | undefined;
     error?: string | undefined;
   } | undefined {
@@ -499,7 +531,13 @@ export class EventStore extends EventEmitter {
       let startedAt: string | undefined;
       let finishedAt: string | undefined;
       let durationSeconds: number | undefined;
+      let cliDurationSeconds: number | undefined;
       let conversationId: string | undefined;
+      let inactivityTimeoutSeconds: number | undefined;
+      let maxDurationSeconds: number | undefined;
+      let timeoutKind: "inactivity" | "max_duration" | undefined;
+      let lastActivityAt: string | undefined;
+      let lastProgress: string | undefined;
       const stepEvents: Array<{
         step_type?: string | undefined;
         state?: string | undefined;
@@ -508,6 +546,8 @@ export class EventStore extends EventEmitter {
       }> = [];
       const deniedActions: string[] = [];
       let usage: AgyUsage | undefined;
+      let cumulativeUsage: AgyUsage | undefined;
+      let hasModernCumulativeUsage = false;
       let result: string | undefined;
       let error: string | undefined;
 
@@ -525,6 +565,9 @@ export class EventStore extends EventEmitter {
               if (d.brief) brief = String(d.brief);
               else if (d.task) brief = String(d.task);
               if (d.effective_prompt) effectivePrompt = String(d.effective_prompt);
+              if (typeof d.inactivity_timeout_seconds === "number") inactivityTimeoutSeconds = d.inactivity_timeout_seconds;
+              else if (typeof d.timeout_seconds === "number") inactivityTimeoutSeconds = d.timeout_seconds;
+              if (typeof d.max_duration_seconds === "number") maxDurationSeconds = d.max_duration_seconds;
               if (!createdAt) createdAt = (d.created_at as string) || evt.timestamp;
               status = "queued";
             } else if (state === "started" || state === "running") {
@@ -534,13 +577,20 @@ export class EventStore extends EventEmitter {
               status = "succeeded";
               finishedAt = (d.finished_at as string) || evt.timestamp;
               if (typeof d.duration_seconds === "number") durationSeconds = d.duration_seconds;
+              if (typeof d.cli_duration_seconds === "number") cliDurationSeconds = d.cli_duration_seconds;
               if (typeof d.response === "string") result = d.response;
               if (d.usage) usage = d.usage as AgyUsage;
+              if (d.cumulative_usage) {
+                cumulativeUsage = d.cumulative_usage as AgyUsage;
+                hasModernCumulativeUsage = true;
+              }
               if (typeof d.conversation_id === "string") conversationId = d.conversation_id;
             } else if (state === "failed") {
               status = "failed";
               finishedAt = (d.finished_at as string) || evt.timestamp;
               if (typeof d.error === "string") error = d.error;
+              if (typeof d.duration_seconds === "number") durationSeconds = d.duration_seconds;
+              if (d.timeout_kind === "inactivity" || d.timeout_kind === "max_duration") timeoutKind = d.timeout_kind;
             } else if (state === "canceled") {
               status = "canceled";
               finishedAt = (d.finished_at as string) || evt.timestamp;
@@ -554,13 +604,16 @@ export class EventStore extends EventEmitter {
               }
             }
           } else if (evt.eventType === "init" || evt.event === "init") {
+            lastActivityAt = evt.timestamp || lastActivityAt;
             if (typeof d.conversation_id === "string") conversationId = d.conversation_id;
             else if (typeof evt.conversation_id === "string") conversationId = evt.conversation_id;
           } else if (evt.eventType === "step" || evt.event === "step_update" || evt.step_update) {
             stepEvents.push(d);
+            lastActivityAt = evt.timestamp || lastActivityAt;
             const stateStr = String(d.state || "");
             const stepTypeStr = String(d.step_type || "");
             const textDeltaStr = String(d.text_delta || "");
+            lastProgress = [stepTypeStr, stateStr, textDeltaStr].filter(Boolean).join(": ").slice(0, 512);
             if (
               stateStr.toUpperCase() === "DENIED" ||
               stepTypeStr.toLowerCase().includes("permission") ||
@@ -589,8 +642,9 @@ export class EventStore extends EventEmitter {
               if (typeof d.error === "string") error = d.error;
             }
             finishedAt = evt.timestamp || new Date().toISOString();
-            if (typeof d.duration_seconds === "number") durationSeconds = d.duration_seconds;
-            if (d.usage) usage = d.usage as AgyUsage;
+            if (typeof d.duration_seconds === "number") cliDurationSeconds = d.duration_seconds;
+            if (d.usage) cumulativeUsage = d.usage as AgyUsage;
+            lastActivityAt = evt.timestamp || lastActivityAt;
 
             const resDenied = Array.isArray(d.denied_actions)
               ? d.denied_actions
@@ -608,6 +662,14 @@ export class EventStore extends EventEmitter {
           // Ignore malformed line
         }
       }
+
+      if (durationSeconds === undefined && startedAt && finishedAt) {
+        durationSeconds = Math.max(0, (Date.parse(finishedAt) - Date.parse(startedAt)) / 1_000);
+      } else if (durationSeconds === undefined && cliDurationSeconds !== undefined) {
+        // Legacy run files stored only the CLI-reported duration.
+        durationSeconds = cliDurationSeconds;
+      }
+      if (!usage && cumulativeUsage && !hasModernCumulativeUsage) usage = cumulativeUsage;
 
       const MAX_DENIED = 20;
       const totalDenied = deniedActions.length;
@@ -633,7 +695,13 @@ export class EventStore extends EventEmitter {
         ...(startedAt ? { started_at: startedAt } : {}),
         ...(finishedAt ? { finished_at: finishedAt } : {}),
         ...(durationSeconds !== undefined ? { duration_seconds: durationSeconds } : {}),
+        ...(cliDurationSeconds !== undefined ? { cli_duration_seconds: cliDurationSeconds } : {}),
+        ...(inactivityTimeoutSeconds !== undefined ? { inactivity_timeout_seconds: inactivityTimeoutSeconds } : {}),
+        ...(maxDurationSeconds !== undefined ? { max_duration_seconds: maxDurationSeconds } : {}),
         ...(conversationId ? { conversation_id: conversationId } : {}),
+        ...(timeoutKind ? { timeout_kind: timeoutKind } : {}),
+        ...(lastActivityAt ? { last_activity_at: lastActivityAt } : {}),
+        ...(lastProgress ? { last_progress: lastProgress } : {}),
         total_steps: totalSteps,
         step_offset: offset,
         step_limit: limit,
@@ -643,6 +711,7 @@ export class EventStore extends EventEmitter {
         denied_actions: slicedDenied,
         has_more_denied_actions: hasMoreDenied,
         ...(usage ? { usage } : {}),
+        ...(cumulativeUsage ? { cumulative_usage: cumulativeUsage } : {}),
         ...(result !== undefined ? { result: boundText(result, 32_768) } : {}),
         ...(error !== undefined ? { error: boundText(error, 16_384) } : {})
       };

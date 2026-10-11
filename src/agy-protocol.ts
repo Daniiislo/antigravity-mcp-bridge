@@ -68,9 +68,15 @@ export interface DelegationResult {
   response: string;
   conversationId: string;
   status: string;
+  /** Per-turn bridge wall-clock duration. */
   durationSeconds: number;
+  /** Raw duration reported by the CLI, which may be conversation-cumulative. */
+  cliDurationSeconds: number;
   numTurns: number;
-  usage: AgyUsage;
+  /** Per-turn usage delta derived from the CLI cumulative counters. */
+  usage?: AgyUsage | undefined;
+  /** Raw usage counters reported by the CLI. */
+  cumulativeUsage: AgyUsage;
   progress: string[];
 }
 

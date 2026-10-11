@@ -1,4 +1,5 @@
 import { realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { resolveAgyExecutable, type ResolveExecutableOptions } from "./resolve-executable.js";
 
@@ -14,10 +15,32 @@ export interface BridgeConfig {
   agent?: string;
   sandbox: boolean;
   dangerouslySkipPermissions: boolean;
+  /** Legacy property name retained for API compatibility; now the inactivity timeout. */
   defaultTimeoutMs: number;
+  maxTurnTimeoutMs?: number;
   maxStderrBytes: number;
   dashboardEnabled?: boolean;
   dashboardPort?: number;
+}
+
+export function resolveDefaultRunsDir(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  homeDirectory = homedir()
+): string {
+  if (platform === "win32") {
+    const localAppData = env.LOCALAPPDATA?.trim();
+    const base = localAppData || path.win32.join(homeDirectory, "AppData", "Local");
+    return path.win32.join(base, "antigravity-mcp-bridge", "runs");
+  }
+
+  if (platform === "darwin") {
+    return path.posix.join(homeDirectory, "Library", "Application Support", "antigravity-mcp-bridge", "runs");
+  }
+
+  const xdgStateHome = env.XDG_STATE_HOME?.trim();
+  const base = xdgStateHome || path.posix.join(homeDirectory, ".local", "state");
+  return path.posix.join(base, "antigravity-mcp-bridge", "runs");
 }
 
 function booleanValue(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
@@ -80,7 +103,13 @@ export function loadConfig(
 ): BridgeConfig {
   const sandbox = booleanValue(env, "AGY_SANDBOX", false);
   const dangerouslySkipPermissions = booleanValue(env, "AGY_DANGEROUSLY_SKIP_PERMISSIONS", false);
-  const defaultTimeoutMs = positiveInteger(env, "AGY_DEFAULT_TIMEOUT_SECONDS", 900) * 1_000;
+  const defaultTimeoutMs = (env.AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS !== undefined
+    ? positiveInteger(env, "AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS", 300)
+    : positiveInteger(env, "AGY_DEFAULT_TIMEOUT_SECONDS", 300)) * 1_000;
+  const maxTurnTimeoutMs = positiveInteger(env, "AGY_MAX_TURN_SECONDS", 1_800) * 1_000;
+  if (maxTurnTimeoutMs < defaultTimeoutMs) {
+    throw new Error("AGY_MAX_TURN_SECONDS must be greater than or equal to the inactivity timeout");
+  }
   const maxStderrBytes = positiveInteger(env, "AGY_MAX_STDERR_BYTES", 32_768);
   const dashboardEnabled = booleanValue(env, "AGY_DASHBOARD_ENABLED", true);
   const dashboardPort = portNumber(env, "AGY_DASHBOARD_PORT", 0);
@@ -99,7 +128,7 @@ export function loadConfig(
     }
     baseArgs = parsed;
   }
-  const runsDir = env.AGY_RUNS_DIR || path.join(startDirectory, ".antigravity-bridge", "runs");
+  const runsDir = env.AGY_RUNS_DIR || resolveDefaultRunsDir(env);
 
   let executable: string;
   if (options?.resolveExecutable === false) {
@@ -123,6 +152,7 @@ export function loadConfig(
     sandbox,
     dangerouslySkipPermissions,
     defaultTimeoutMs,
+    maxTurnTimeoutMs,
     maxStderrBytes,
     dashboardEnabled,
     dashboardPort

@@ -1,5 +1,7 @@
 # Single-Wakeup Wait Implementation Plan
 
+> Status: superseded on 2026-10-11 by the bounded heartbeat fallback. MCP Tasks remains the preferred zero-controller-polling path; non-Tasks callers now receive a compact heartbeat within 60 seconds so the controller can update the user.
+
 **Goal:** Minimize Codex controller wake-ups while an Antigravity job is running, without relying on unsupported MCP task/progress behavior.
 **Source:** Owner request plus independent plan review on 2026-10-05.
 **Architecture:** Keep the existing asynchronous job model. Make public `wait_task` parameterless apart from `job_id`, use the verified 300-second bounded wait internally, and make every non-terminal response direct the controller back to the same wait tool without diagnostics.

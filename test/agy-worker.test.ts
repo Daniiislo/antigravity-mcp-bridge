@@ -1,17 +1,25 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { AgyWorker } from "../src/agy-worker.js";
+import { AgyWorker, type AgyWorkerOptions } from "../src/agy-worker.js";
+import { terminateProcessTree } from "../src/process-tree.js";
 
 const fixture = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "fixtures", "fake-agy.mjs");
 const workers: AgyWorker[] = [];
+const temporaryDirectories: string[] = [];
 
-function createWorker(mode: "accept-edits" | "plan" = "accept-edits") {
+function createWorker(
+  mode: "accept-edits" | "plan" = "accept-edits",
+  overrides: Partial<AgyWorkerOptions> = {}
+) {
   const worker = new AgyWorker({
     role: mode === "plan" ? "tester" : "implementer",
     cwd: process.cwd(), executable: process.execPath, prefixArgs: [fixture], mode,
     defaultTimeoutMs: 1_000, maxStderrBytes: 1_024, sandbox: false,
-    dangerouslySkipPermissions: false
+    dangerouslySkipPermissions: false,
+    ...overrides
   });
   workers.push(worker);
   return worker;
@@ -19,7 +27,27 @@ function createWorker(mode: "accept-edits" | "plan" = "accept-edits") {
 
 afterEach(async () => {
   await Promise.all(workers.splice(0).map((worker) => worker.stop()));
+  for (const directory of temporaryDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("condition was not met before timeout");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 describe("AgyWorker", () => {
   it("reuses one process and conversation for ordered turns", async () => {
@@ -44,8 +72,7 @@ describe("AgyWorker", () => {
   it.each([
     ["ERROR", /fake failure/],
     ["EMPTY_SUCCESS", /empty response/i],
-    ["MALFORMED", /invalid NDJSON/i],
-    ["EXIT", /exited/i]
+    ["MALFORMED", /invalid NDJSON/i]
   ])("invalidates the process after %s", async (prompt, expected) => {
     const worker = createWorker();
     await expect(worker.delegate(prompt)).rejects.toThrow(expected);
@@ -54,11 +81,82 @@ describe("AgyWorker", () => {
     expect(recovered.response).toBe("reply:recovered:accept-edits");
   });
 
-  it("terminates a timed-out process so a late result cannot match the next call", async () => {
+  it("does not restart unsafely when the process exits before Windows tree cleanup can be confirmed", async () => {
     const worker = createWorker();
+    if (process.platform === "win32") {
+      await expect(worker.delegate("EXIT")).rejects.toThrow(/could not confirm termination.*process tree/i);
+      await expect(worker.delegate("recovered")).rejects.toThrow(/unsafe to restart/i);
+      return;
+    }
+
+    await expect(worker.delegate("EXIT")).rejects.toThrow(/exited/i);
+    const recovered = await worker.delegate("recovered");
+    expect(recovered.response).toBe("reply:recovered:accept-edits");
+  });
+
+  it("terminates a timed-out process and resumes the same conversation on the next call", async () => {
+    const worker = createWorker();
+    const first = await worker.delegate("first");
     await expect(worker.delegate("HANG", 30)).rejects.toThrow(/timed out/i);
     expect(worker.status().state).toBe("stopped");
-    expect((await worker.delegate("fresh")).numTurns).toBe(1);
+    const resumed = await worker.delegate("resumed");
+    expect(resumed.conversationId).toBe(first.conversationId);
+    expect(resumed.usage).toBeUndefined();
+    expect(resumed.cumulativeUsage.total_tokens).toBe(2);
+
+    const measurable = await worker.delegate("measurable-again");
+    expect(measurable.usage?.total_tokens).toBe(2);
+  });
+
+  it("resets the inactivity timeout when meaningful progress arrives", async () => {
+    const worker = createWorker();
+    const result = await worker.delegate("PROGRESS_DELAY:4:100:kept-alive", {
+      inactivityTimeoutMs: 200,
+      maxDurationMs: 1_000
+    });
+    expect(result.response).toBe("reply:kept-alive:accept-edits");
+    expect(result.durationSeconds).toBeGreaterThanOrEqual(0.35);
+  });
+
+  it("enforces the absolute duration cap even while progress continues", async () => {
+    const worker = createWorker();
+    await expect(worker.delegate("PROGRESS_DELAY:20:80:too-long", {
+      inactivityTimeoutMs: 200,
+      maxDurationMs: 350
+    })).rejects.toMatchObject({ timeoutKind: "max_duration" });
+    expect(worker.status().state).toBe("stopped");
+  });
+
+  it("kills descendant processes and waits for their exit before allowing a follow-up", async () => {
+    const worker = createWorker();
+    const directory = mkdtempSync(path.join(tmpdir(), "agy-tree-"));
+    temporaryDirectories.push(directory);
+    const pidFile = path.join(directory, "descendant.pid");
+
+    const timedOut = worker.delegate(`SPAWN_CHILD_HANG:${pidFile}`, {
+      inactivityTimeoutMs: 120,
+      maxDurationMs: 1_000
+    });
+    await waitUntil(() => existsSync(pidFile));
+    const descendantPid = Number(readFileSync(pidFile, "utf8"));
+    expect(processExists(descendantPid)).toBe(true);
+
+    await expect(timedOut).rejects.toMatchObject({ timeoutKind: "inactivity" });
+    await waitUntil(() => !processExists(descendantPid));
+    const followup = await worker.delegate("after-tree-cleanup");
+    expect(followup.response).toBe("reply:after-tree-cleanup:accept-edits");
+  });
+
+  it("reports per-turn wall duration and usage deltas separately from CLI cumulative metrics", async () => {
+    const worker = createWorker();
+    const first = await worker.delegate("one");
+    const second = await worker.delegate("DELAY:40:two");
+
+    expect(second.durationSeconds).toBeGreaterThanOrEqual(0.03);
+    expect(second.cliDurationSeconds).toBe(0.02);
+    expect(first.usage?.total_tokens).toBe(2);
+    expect(second.usage?.total_tokens).toBe(2);
+    expect(second.cumulativeUsage.total_tokens).toBe(4);
   });
 
   it("cancels queued turns when the controller explicitly stops the worker", async () => {
@@ -71,6 +169,57 @@ describe("AgyWorker", () => {
     await worker.stop();
     await activeCheck;
     await queuedCheck;
+    expect(worker.status().state).toBe("stopped");
+  });
+
+  it("starts a fresh conversation after an explicit cancellation", async () => {
+    const worker = createWorker();
+    const first = await worker.delegate("first");
+    const active = worker.delegate("HANG", 1_000);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(worker.cancelActiveTurn()).toBe(true);
+    await expect(active).rejects.toThrow(/canceled/i);
+    const fresh = await worker.delegate("fresh-after-cancel");
+    expect(fresh.conversationId).not.toBe(first.conversationId);
+  });
+
+  it("explicit cancellation discards context while timeout cleanup is already in progress", async () => {
+    let releaseTermination!: () => void;
+    let reportTerminationStarted!: () => void;
+    const terminationStarted = new Promise<void>((resolve) => { reportTerminationStarted = resolve; });
+    const terminationReleased = new Promise<void>((resolve) => { releaseTermination = resolve; });
+    const worker = createWorker("accept-edits", {
+      terminateTree: async (child) => {
+        reportTerminationStarted();
+        await terminationReleased;
+        await terminateProcessTree(child);
+      }
+    });
+    const first = await worker.delegate("first");
+    const timedOut = worker.delegate("HANG", 50);
+    await terminationStarted;
+
+    expect(worker.cancelActiveTurn("explicit cancel during timeout cleanup")).toBe(true);
+    releaseTermination();
+    await expect(timedOut).rejects.toThrow(/timed out/i);
+
+    const fresh = await worker.delegate("fresh-after-race");
+    expect(fresh.conversationId).not.toBe(first.conversationId);
+  });
+
+  it("poisons the worker instead of advancing the queue when tree termination cannot be confirmed", async () => {
+    const worker = createWorker("accept-edits", {
+      terminateTree: async (child) => {
+        await terminateProcessTree(child);
+        throw new Error("simulated unconfirmed process tree");
+      }
+    });
+    const active = worker.delegate("HANG", 50);
+    const queued = worker.delegate("must-not-run");
+
+    await expect(active).rejects.toThrow(/termination could not be confirmed/i);
+    await expect(queued).rejects.toThrow(/unsafe to restart/i);
+    await expect(worker.delegate("also-must-not-run")).rejects.toThrow(/unsafe to restart/i);
     expect(worker.status().state).toBe("stopped");
   });
 

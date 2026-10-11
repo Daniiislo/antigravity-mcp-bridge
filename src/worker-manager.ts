@@ -1,7 +1,7 @@
-import path from "node:path";
+import { randomInt } from "node:crypto";
 import { normalizeDeniedAction, type AgyTerminalResult, type AgyUsage, type DelegationResult } from "./agy-protocol.js";
-import { AgyWorker, type AgyWorkerRawEvent, type WorkerStatus } from "./agy-worker.js";
-import { resolveAllowedWorkspace, type BridgeConfig, type Role } from "./config.js";
+import { AgyTimeoutError, AgyWorker, type AgyWorkerRawEvent, type TimeoutKind, type WorkerStatus } from "./agy-worker.js";
+import { resolveAllowedWorkspace, resolveDefaultRunsDir, type BridgeConfig, type Role } from "./config.js";
 import {
   boundStepEvent,
   boundText,
@@ -57,15 +57,22 @@ export interface JobRecord {
   workspace: string;
   brief: string;
   effectivePrompt: string;
+  timeoutMs?: number | undefined;
+  maxDurationMs?: number | undefined;
   status: JobStatus;
   createdAt: string;
   startedAt?: string | undefined;
   finishedAt?: string | undefined;
   durationSeconds?: number | undefined;
+  cliDurationSeconds?: number | undefined;
   usage?: AgyUsage | undefined;
+  cumulativeUsage?: AgyUsage | undefined;
   result?: string | undefined;
   error?: string | undefined;
   conversationId?: string | undefined;
+  timeoutKind?: TimeoutKind | undefined;
+  lastActivityAt?: string | undefined;
+  lastProgress?: string | undefined;
   stepEvents: Array<{
     step_type?: string | undefined;
     state?: string | undefined;
@@ -105,7 +112,13 @@ export interface InspectTaskResult {
   started_at?: string | undefined;
   finished_at?: string | undefined;
   duration_seconds?: number | undefined;
+  cli_duration_seconds?: number | undefined;
+  inactivity_timeout_seconds?: number | undefined;
+  max_duration_seconds?: number | undefined;
   conversation_id?: string | undefined;
+  timeout_kind?: TimeoutKind | undefined;
+  last_activity_at?: string | undefined;
+  last_progress?: string | undefined;
   total_steps: number;
   step_offset?: number | undefined;
   step_limit?: number | undefined;
@@ -120,6 +133,7 @@ export interface InspectTaskResult {
   denied_actions: string[];
   has_more_denied_actions: boolean;
   usage?: AgyUsage | undefined;
+  cumulative_usage?: AgyUsage | undefined;
   result?: string | undefined;
   error?: string | undefined;
   caller_payload_chars: number;
@@ -135,15 +149,17 @@ export class WorkerManager {
   private readonly modelCatalog: ModelCatalog;
   private readonly runsDir: string;
   private dashboardServer?: DashboardServer | undefined;
-  private workerCounter = 0;
-  private jobCounter = 0;
+  // Random numeric seeds retain the public ID format while preventing separate
+  // MCP processes from generating the same IDs in a shared runs directory.
+  private workerCounter = randomInt(1, 1_000_000_000);
+  private jobCounter = randomInt(1, 1_000_000_000);
 
   constructor(
     private readonly config: BridgeConfig,
     private readonly prefixArgs: string[] = config.baseArgs ?? [],
     options?: { runsDir?: string | undefined }
   ) {
-    this.runsDir = options?.runsDir || config.runsDir || path.join(process.cwd(), ".antigravity-bridge", "runs");
+    this.runsDir = options?.runsDir || config.runsDir || resolveDefaultRunsDir();
     this.eventStore = new EventStore({ runsDir: this.runsDir, maxFieldBytes: config.maxStderrBytes });
     this.modelCatalog = new ModelCatalog({
       executable: config.executable,
@@ -172,6 +188,7 @@ export class WorkerManager {
       sandbox: this.config.sandbox,
       dangerouslySkipPermissions: this.config.dangerouslySkipPermissions,
       defaultTimeoutMs: this.config.defaultTimeoutMs,
+      ...(this.config.maxTurnTimeoutMs ? { defaultMaxTurnMs: this.config.maxTurnTimeoutMs } : {}),
       maxStderrBytes: this.config.maxStderrBytes,
       onRawEvent: (raw) => {
         this.handleRawWorkerEvent(workerId, raw);
@@ -218,13 +235,30 @@ export class WorkerManager {
     };
   }
 
-  async dispatchTask(workerId: string, brief: string): Promise<{ jobId: string; workerId: string; status: JobStatus }> {
+  async dispatchTask(
+    workerId: string,
+    brief: string,
+    timeoutSeconds?: number | undefined,
+    maxDurationSeconds?: number | undefined
+  ): Promise<{ jobId: string; workerId: string; status: JobStatus }> {
     const worker = this.explicitWorkers.get(workerId);
     if (!worker) {
       throw new Error(`Worker not found: ${workerId}`);
     }
     if (worker.status === "closed") {
       throw new Error(`Worker is closed: ${workerId}`);
+    }
+    if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0)) {
+      throw new Error("inactivity timeout must be positive");
+    }
+    if (maxDurationSeconds !== undefined && (!Number.isFinite(maxDurationSeconds) || maxDurationSeconds <= 0)) {
+      throw new Error("maximum duration must be positive");
+    }
+    const effectiveInactivitySeconds = timeoutSeconds ?? (this.config.defaultTimeoutMs / 1_000);
+    const effectiveMaxDurationSeconds = maxDurationSeconds
+      ?? (this.config.maxTurnTimeoutMs === undefined ? undefined : this.config.maxTurnTimeoutMs / 1_000);
+    if (effectiveMaxDurationSeconds !== undefined && effectiveMaxDurationSeconds < effectiveInactivitySeconds) {
+      throw new Error("maximum duration must be greater than or equal to the inactivity timeout");
     }
 
     this.jobCounter += 1;
@@ -241,6 +275,8 @@ export class WorkerManager {
       workspace: worker.workspace,
       brief,
       effectivePrompt,
+      ...(timeoutSeconds === undefined ? {} : { timeoutMs: timeoutSeconds * 1_000 }),
+      ...(maxDurationSeconds === undefined ? {} : { maxDurationMs: maxDurationSeconds * 1_000 }),
       status: "queued",
       createdAt: new Date().toISOString(),
       stepEvents: [],
@@ -260,6 +296,8 @@ export class WorkerManager {
         workspace: worker.workspace,
         brief,
         effective_prompt: effectivePrompt,
+        ...(timeoutSeconds === undefined ? {} : { inactivity_timeout_seconds: timeoutSeconds }),
+        ...(maxDurationSeconds === undefined ? {} : { max_duration_seconds: maxDurationSeconds }),
         created_at: job.createdAt
       }
     });
@@ -273,8 +311,66 @@ export class WorkerManager {
     };
   }
 
-  async sendFollowup(workerId: string, finding: string): Promise<{ jobId: string; workerId: string; status: JobStatus }> {
-    return this.dispatchTask(workerId, finding);
+  async sendFollowup(
+    workerId: string,
+    finding: string,
+    timeoutSeconds?: number | undefined,
+    maxDurationSeconds?: number | undefined
+  ): Promise<{ jobId: string; workerId: string; status: JobStatus }> {
+    return this.dispatchTask(workerId, finding, timeoutSeconds, maxDurationSeconds);
+  }
+
+  async waitTaskHeartbeat(
+    jobId: string,
+    options: { waitMs?: number | undefined; signal?: AbortSignal | undefined } = {}
+  ): Promise<InspectTaskResult & { terminal: boolean; elapsed_seconds: number }> {
+    const job = this.jobs.get(jobId);
+    if (!job) {
+      const persisted = this.eventStore.readDiskJob(jobId);
+      if (!persisted) throw new Error(`Job not found: ${jobId}`);
+      if (persisted.status === "queued" || persisted.status === "running") {
+        throw new Error(`ORPHANED_JOB: ${jobId} was ${persisted.status} when the bridge stopped and cannot be resumed safely`);
+      }
+      const inspected = this.inspectTask(jobId);
+      return { ...inspected, terminal: true, elapsed_seconds: this.elapsedSeconds(inspected.started_at, inspected.finished_at) };
+    }
+
+    const isTerminal = () => job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
+    const waitMs = Math.min(Math.max(options.waitMs ?? 55_000, 0), 60_000);
+    const signal = options.signal;
+    if (!isTerminal() && waitMs > 0) {
+      if (signal?.aborted) throw this.waitAbortedError(jobId);
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+          clearTimeout(timer);
+          this.eventStore.off("event", onEvent);
+          signal?.removeEventListener("abort", onAbort);
+        };
+        const finish = (callback: () => void) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          callback();
+        };
+        const onEvent = (event: NormalizedEvent) => {
+          if (event.jobId === jobId && isTerminal()) finish(resolve);
+        };
+        const onAbort = () => finish(() => reject(this.waitAbortedError(jobId)));
+        const timer = setTimeout(() => finish(resolve), waitMs);
+        this.eventStore.on("event", onEvent);
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (isTerminal()) finish(resolve);
+        else if (signal?.aborted) onAbort();
+      });
+    }
+
+    const inspected = this.inspectTask(jobId);
+    return {
+      ...inspected,
+      terminal: isTerminal(),
+      elapsed_seconds: this.elapsedSeconds(inspected.started_at, inspected.finished_at)
+    };
   }
 
   async waitTask(jobId: string, options?: { waitMs?: number | undefined; afterCursor?: number | undefined }): Promise<WaitTaskResult> {
@@ -431,7 +527,13 @@ export class WorkerManager {
       ...(job.startedAt ? { started_at: job.startedAt } : {}),
       ...(job.finishedAt ? { finished_at: job.finishedAt } : {}),
       ...(job.durationSeconds !== undefined ? { duration_seconds: job.durationSeconds } : {}),
+      ...(job.cliDurationSeconds !== undefined ? { cli_duration_seconds: job.cliDurationSeconds } : {}),
+      ...(job.timeoutMs !== undefined ? { inactivity_timeout_seconds: job.timeoutMs / 1_000 } : {}),
+      ...(job.maxDurationMs !== undefined ? { max_duration_seconds: job.maxDurationMs / 1_000 } : {}),
       ...(job.conversationId ? { conversation_id: job.conversationId } : {}),
+      ...(job.timeoutKind ? { timeout_kind: job.timeoutKind } : {}),
+      ...(job.lastActivityAt ? { last_activity_at: job.lastActivityAt } : {}),
+      ...(job.lastProgress ? { last_progress: job.lastProgress } : {}),
       total_steps: totalSteps,
       step_offset: offset,
       step_limit: limit,
@@ -441,6 +543,7 @@ export class WorkerManager {
       denied_actions: slicedDenied,
       has_more_denied_actions: hasMoreDenied,
       ...(job.usage ? { usage: job.usage } : {}),
+      ...(job.cumulativeUsage ? { cumulative_usage: job.cumulativeUsage } : {}),
       ...(job.result !== undefined ? { result: job.result } : {}),
       ...(job.error !== undefined ? { error: job.error } : {})
     }, options);
@@ -463,8 +566,15 @@ export class WorkerManager {
       ...(source.started_at ? { started_at: source.started_at } : {}),
       ...(source.finished_at ? { finished_at: source.finished_at } : {}),
       ...(source.duration_seconds !== undefined ? { duration_seconds: source.duration_seconds } : {}),
+      ...(source.cli_duration_seconds !== undefined ? { cli_duration_seconds: source.cli_duration_seconds } : {}),
+      ...(source.inactivity_timeout_seconds !== undefined ? { inactivity_timeout_seconds: source.inactivity_timeout_seconds } : {}),
+      ...(source.max_duration_seconds !== undefined ? { max_duration_seconds: source.max_duration_seconds } : {}),
       ...(source.conversation_id ? { conversation_id: source.conversation_id } : {}),
+      ...(source.timeout_kind ? { timeout_kind: source.timeout_kind } : {}),
+      ...(source.last_activity_at ? { last_activity_at: source.last_activity_at } : {}),
+      ...(source.last_progress ? { last_progress: source.last_progress } : {}),
       ...(source.usage ? { usage: source.usage } : {}),
+      ...(source.cumulative_usage ? { cumulative_usage: source.cumulative_usage } : {}),
       ...(source.result !== undefined ? { result: boundText(source.result, 12_288) } : {}),
       ...(source.error !== undefined ? { error: boundText(source.error, 4_096) } : {}),
       ...(includePrompt ? { brief: boundText(source.brief, 2_048) ?? "", effective_prompt: boundText(source.effective_prompt, 4_096) ?? "" } : {}),
@@ -479,6 +589,12 @@ export class WorkerManager {
     };
     const chars = JSON.stringify(compact).length;
     return { ...compact, caller_payload_chars: chars };
+  }
+
+  private elapsedSeconds(startedAt: string | undefined, finishedAt: string | undefined): number {
+    if (!startedAt) return 0;
+    const endMs = finishedAt ? Date.parse(finishedAt) : Date.now();
+    return Math.max(0, (endMs - Date.parse(startedAt)) / 1_000);
   }
 
   async cancelTask(jobId: string): Promise<{ jobId: string; status: JobStatus; active: boolean }> {
@@ -611,7 +727,10 @@ export class WorkerManager {
         ...(job.startedAt ? { started_at: job.startedAt } : {}),
         ...(job.finishedAt ? { finished_at: job.finishedAt } : {}),
         ...(job.durationSeconds !== undefined ? { duration_seconds: job.durationSeconds } : {}),
+        ...(job.cliDurationSeconds !== undefined ? { cli_duration_seconds: job.cliDurationSeconds } : {}),
         ...(job.usage ? { usage: job.usage } : {}),
+        ...(job.cumulativeUsage ? { cumulative_usage: job.cumulativeUsage } : {}),
+        ...(job.timeoutKind ? { timeout_kind: job.timeoutKind } : {}),
         ...(job.result ? { result: job.result } : {}),
         ...(job.error ? { error: job.error } : {})
       });
@@ -758,7 +877,13 @@ export class WorkerManager {
 
   // --- Compatibility methods ---
 
-  async delegate(role: Role, task: string, cwd: string, timeoutSeconds?: number | undefined): Promise<DelegationResult> {
+  async delegate(
+    role: Role,
+    task: string,
+    cwd: string,
+    timeoutSeconds?: number | undefined,
+    maxDurationSeconds?: number | undefined
+  ): Promise<DelegationResult> {
     const workspace = resolveAllowedWorkspace(cwd, this.config.allowedRoots);
     let worker = this.implicitWorkers.get(role);
     if (worker && worker.status().cwd !== workspace) {
@@ -782,12 +907,19 @@ export class WorkerManager {
         sandbox: this.config.sandbox,
         dangerouslySkipPermissions: this.config.dangerouslySkipPermissions,
         defaultTimeoutMs: this.config.defaultTimeoutMs,
+        ...(this.config.maxTurnTimeoutMs ? { defaultMaxTurnMs: this.config.maxTurnTimeoutMs } : {}),
         maxStderrBytes: this.config.maxStderrBytes
       });
       this.implicitWorkers.set(role, worker);
     }
     const timeoutMs = timeoutSeconds === undefined ? undefined : timeoutSeconds * 1_000;
-    return timeoutMs === undefined ? worker.delegate(task) : worker.delegate(task, timeoutMs);
+    const maxDurationMs = maxDurationSeconds === undefined ? undefined : maxDurationSeconds * 1_000;
+    return timeoutMs === undefined && maxDurationMs === undefined
+      ? worker.delegate(task)
+      : worker.delegate(task, {
+          ...(timeoutMs === undefined ? {} : { inactivityTimeoutMs: timeoutMs }),
+          ...(maxDurationMs === undefined ? {} : { maxDurationMs })
+        });
   }
 
   status(role?: Role | undefined): WorkerStatus[] {
@@ -830,6 +962,7 @@ export class WorkerManager {
     const worker = this.explicitWorkers.get(workerId);
     const activeJob = worker?.activeJob;
     const jobId = activeJob?.jobId;
+    if (activeJob) activeJob.lastActivityAt = new Date().toISOString();
 
     if (raw.type === "init") {
       this.eventStore.recordEvent({
@@ -851,6 +984,7 @@ export class WorkerManager {
         const stateStr = String(stepUpdate.state || "");
         const stepTypeStr = String(stepUpdate.step_type || "");
         const textDeltaStr = String(stepUpdate.text_delta || "");
+        activeJob.lastProgress = [stepTypeStr, stateStr, textDeltaStr].filter(Boolean).join(": ").slice(0, 512);
 
         if (
           stateStr.toUpperCase() === "DENIED" ||
@@ -918,6 +1052,7 @@ export class WorkerManager {
     worker.status = "busy";
     nextJob.status = "running";
     nextJob.startedAt = new Date().toISOString();
+    nextJob.lastActivityAt = nextJob.startedAt;
 
     this.eventStore.recordEvent({
       eventType: "lifecycle",
@@ -931,12 +1066,19 @@ export class WorkerManager {
 
     (async () => {
       try {
-        const result = await worker.worker.delegate(nextJob.effectivePrompt);
+        const result = nextJob.timeoutMs === undefined && nextJob.maxDurationMs === undefined
+          ? await worker.worker.delegate(nextJob.effectivePrompt)
+          : await worker.worker.delegate(nextJob.effectivePrompt, {
+              ...(nextJob.timeoutMs === undefined ? {} : { inactivityTimeoutMs: nextJob.timeoutMs }),
+              ...(nextJob.maxDurationMs === undefined ? {} : { maxDurationMs: nextJob.maxDurationMs })
+            });
         if (nextJob.status !== "canceled") {
           nextJob.status = "succeeded";
           nextJob.finishedAt = new Date().toISOString();
           nextJob.durationSeconds = result.durationSeconds;
+          nextJob.cliDurationSeconds = result.cliDurationSeconds;
           nextJob.usage = result.usage;
+          nextJob.cumulativeUsage = result.cumulativeUsage;
           nextJob.result = result.response;
           nextJob.conversationId = result.conversationId;
 
@@ -949,7 +1091,9 @@ export class WorkerManager {
               status: "SUCCESS",
               finished_at: nextJob.finishedAt,
               duration_seconds: nextJob.durationSeconds,
+              cli_duration_seconds: nextJob.cliDurationSeconds,
               usage: nextJob.usage,
+              cumulative_usage: nextJob.cumulativeUsage,
               response: nextJob.result,
               conversation_id: nextJob.conversationId,
               denied_actions: [...nextJob.deniedActions]
@@ -960,7 +1104,9 @@ export class WorkerManager {
         if (nextJob.status !== "canceled") {
           nextJob.status = "failed";
           nextJob.finishedAt = new Date().toISOString();
+          nextJob.durationSeconds = this.elapsedSeconds(nextJob.startedAt, nextJob.finishedAt);
           nextJob.error = err instanceof Error ? err.message : String(err);
+          if (err instanceof AgyTimeoutError) nextJob.timeoutKind = err.timeoutKind;
 
           this.eventStore.recordEvent({
             eventType: "lifecycle",
@@ -970,7 +1116,9 @@ export class WorkerManager {
               lifecycle: "failed",
               status: "ERROR",
               finished_at: nextJob.finishedAt,
+              duration_seconds: nextJob.durationSeconds,
               error: nextJob.error,
+              ...(nextJob.timeoutKind ? { timeout_kind: nextJob.timeoutKind } : {}),
               denied_actions: [...nextJob.deniedActions]
             }
           });
