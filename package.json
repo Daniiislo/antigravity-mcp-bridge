@@ -40,7 +40,9 @@
     "install:plugin": "node scripts/register-plugin.mjs",
     "dashboard": "node scripts/dashboard.mjs",
     "clean": "node scripts/clean-runs.mjs",
-    "prune": "node scripts/clean-runs.mjs"
+    "prune": "node scripts/clean-runs.mjs",
+    "reload:codex": "node scripts/reload-codex.mjs",
+    "reload": "npm run build && node scripts/reload-codex.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-tasks": "^0.2.2",
