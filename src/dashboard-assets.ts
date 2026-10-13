@@ -208,6 +208,18 @@ export function getDashboardHtml(token: string): string {
       list-style: none;
     }
 
+    .storage-warning {
+      margin: 8px;
+      padding: 8px;
+      border: 1px solid var(--status-failed);
+      border-radius: 5px;
+      color: var(--text-main);
+      background: var(--bg-panel);
+      font-size: 11px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
     .job-item {
       padding: 9px 12px;
       border-bottom: 1px solid var(--border-subtle);
@@ -789,6 +801,7 @@ export function getDashboardHtml(token: string): string {
           </select>
         </div>
       </div>
+      <div id="storage-warning" class="storage-warning" role="status" style="display:none;"></div>
       <div id="job-list" class="job-list"></div>
     </aside>
 
@@ -951,6 +964,7 @@ export function getDashboardHtml(token: string): string {
       const filterStatus = document.getElementById("filter-status");
       const filterWorker = document.getElementById("filter-worker");
       const jobListContainer = document.getElementById("job-list");
+      const storageWarning = document.getElementById("storage-warning");
 
       // Actions & Modal elements
       const btnDeleteJob = document.getElementById("btn-delete-job");
@@ -1642,6 +1656,20 @@ export function getDashboardHtml(token: string): string {
           const res = await fetch(BASE_API + "/snapshot");
           if (!res.ok) throw new Error("Snapshot HTTP " + res.status);
           const snap = await res.json();
+
+          const store = snap.history_store;
+          if (store && (store.job_file_count === 0 || snap.jobs.length === 0)) {
+            storageWarning.style.display = "block";
+            if (!store.directory_exists && (!store.fallback_directories || store.fallback_directories.length === 0)) {
+              storageWarning.textContent = "History directory does not exist for this process: " + store.directory + ". This dashboard cannot see jobs stored by another MCP runtime. Use that MCP server's open_dashboard tool, or point AGY_RUNS_DIR at a shared history directory.";
+            } else if (store.job_file_count === 0) {
+              storageWarning.textContent = "No job history files were found in " + store.directory + ". If another Codex/AGY dashboard shows jobs, it is using a different runtime or history directory.";
+            } else if (snap.jobs.length === 0) {
+              storageWarning.textContent = "Found " + store.job_file_count + " history files in " + store.directory + " but could not load any jobs. Check the bridge log for unreadable or malformed files.";
+            }
+          } else {
+            storageWarning.style.display = "none";
+          }
 
           if (Array.isArray(snap.workers)) {
             for (const w of snap.workers) {

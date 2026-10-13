@@ -119,6 +119,7 @@ export interface RecordEventInput {
 
 export interface EventStoreOptions {
   runsDir: string;
+  fallbackRunsDirs?: string[] | undefined;
   maxFieldBytes?: number | undefined;
 }
 
@@ -174,12 +175,33 @@ export class EventStore extends EventEmitter {
   private currentCursor = 0;
   private readonly events: NormalizedEvent[] = [];
   private readonly runsDir: string;
+  private readonly fallbackRunsDirs: string[];
   private readonly maxFieldBytes: number;
 
   constructor(options: EventStoreOptions) {
     super();
     this.runsDir = options.runsDir;
+    this.fallbackRunsDirs = (options.fallbackRunsDirs || []).filter(
+      (dir) => dir && dir.toLowerCase() !== options.runsDir.toLowerCase()
+    );
     this.maxFieldBytes = options.maxFieldBytes ?? 32_768;
+  }
+
+  private findJobFile(jobId: string): string | undefined {
+    if (!jobId || typeof jobId !== "string" || !/^[a-zA-Z0-9_-]+$/.test(jobId)) {
+      return undefined;
+    }
+    const allDirs = [this.runsDir, ...this.fallbackRunsDirs];
+    for (const dir of allDirs) {
+      if (!existsSync(dir)) continue;
+      const runsRoot = path.resolve(dir);
+      const filePath = path.resolve(runsRoot, `${jobId}.ndjson`);
+      const relative = path.relative(runsRoot, filePath);
+      if (!relative.startsWith("..") && !path.isAbsolute(relative) && existsSync(filePath)) {
+        return filePath;
+      }
+    }
+    return undefined;
   }
 
   get latestCursor(): number {
@@ -246,20 +268,23 @@ export class EventStore extends EventEmitter {
     status?: string | undefined;
     limit?: number | undefined;
   }): Promise<JobHistorySummary[]> {
-    if (!existsSync(this.runsDir)) return [];
-
-    let files: string[] = [];
-    try {
-      files = readdirSync(this.runsDir).filter((f) => f.endsWith(".ndjson"));
-    } catch (err) {
-      console.error(`[antigravity-mcp-bridge] Failed to read runs directory: ${err instanceof Error ? err.message : String(err)}`);
-      return [];
-    }
-
+    const allDirs = [this.runsDir, ...this.fallbackRunsDirs];
     const summaries: JobHistorySummary[] = [];
+    const seenJobIds = new Set<string>();
 
-    for (const file of files) {
-      const filePath = path.join(this.runsDir, file);
+    for (const dir of allDirs) {
+      if (!existsSync(dir)) continue;
+
+      let files: string[] = [];
+      try {
+        files = readdirSync(dir).filter((f) => f.endsWith(".ndjson"));
+      } catch (err) {
+        console.error(`[antigravity-mcp-bridge] Failed to read runs directory ${dir}: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
+
+      for (const file of files) {
+        const filePath = path.join(dir, file);
       try {
         const content = readFileSync(filePath, "utf8");
         const lines = content.split(/\r?\n/).filter((line) => line.trim().length > 0);
@@ -360,7 +385,8 @@ export class EventStore extends EventEmitter {
         }
         if (!usage && cumulativeUsage && !hasModernCumulativeUsage) usage = cumulativeUsage;
 
-        if (jobId) {
+        if (jobId && !seenJobIds.has(jobId)) {
+          seenJobIds.add(jobId);
           summaries.push({
             ...(requestKey ? { request_key: requestKey, request_fingerprint: requestFingerprint } : {}),
             job_id: jobId,
@@ -388,6 +414,7 @@ export class EventStore extends EventEmitter {
         console.error(`[antigravity-mcp-bridge] Failed to read run file ${file}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    }
 
     let filtered = summaries;
     if (filter?.workerId) {
@@ -408,16 +435,17 @@ export class EventStore extends EventEmitter {
     if (!jobId || typeof jobId !== "string" || !/^[a-zA-Z0-9_-]+$/.test(jobId)) {
       throw new Error(`Invalid job ID for deletion: ${jobId}`);
     }
-    const resolvedDir = path.resolve(this.runsDir);
-    const targetPath = path.resolve(resolvedDir, `${jobId}.ndjson`);
-    if (!targetPath.startsWith(resolvedDir)) {
-      throw new Error(`Access denied: job path outside runs directory`);
-    }
 
     let deleted = false;
-    if (existsSync(targetPath)) {
-      unlinkSync(targetPath);
-      deleted = true;
+    const allDirs = [this.runsDir, ...this.fallbackRunsDirs];
+    for (const dir of allDirs) {
+      if (!existsSync(dir)) continue;
+      const resolvedDir = path.resolve(dir);
+      const targetPath = path.resolve(resolvedDir, `${jobId}.ndjson`);
+      if (targetPath.startsWith(resolvedDir) && existsSync(targetPath)) {
+        unlinkSync(targetPath);
+        deleted = true;
+      }
     }
 
     // Purge in-memory events for this job
@@ -532,13 +560,8 @@ export class EventStore extends EventEmitter {
     result?: string | undefined;
     error?: string | undefined;
   } | undefined {
-    if (!jobId || !existsSync(this.runsDir)) return undefined;
-
-    const runsRoot = path.resolve(this.runsDir);
-    const filePath = path.resolve(runsRoot, `${jobId}.ndjson`);
-    const relativePath = path.relative(runsRoot, filePath);
-    if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return undefined;
-    if (!existsSync(filePath)) return undefined;
+    const filePath = this.findJobFile(jobId);
+    if (!filePath) return undefined;
 
     try {
       const content = readFileSync(filePath, "utf8");
@@ -760,9 +783,8 @@ export class EventStore extends EventEmitter {
   }
 
   readDiskJobEvents(jobId: string): NormalizedEvent[] {
-    if (!jobId || !existsSync(this.runsDir)) return [];
-    const filePath = path.join(this.runsDir, `${jobId}.ndjson`);
-    if (!existsSync(filePath)) return [];
+    const filePath = this.findJobFile(jobId);
+    if (!filePath) return [];
 
     try {
       const content = readFileSync(filePath, "utf8");

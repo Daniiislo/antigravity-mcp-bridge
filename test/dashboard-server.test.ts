@@ -441,6 +441,88 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
   });
 
   describe("Snapshot, SSE Stream, Cursors, and Filtering", () => {
+    it("reports when this dashboard's configured history directory is missing", async () => {
+      const parent = mkdtempSync(path.join(tmpdir(), "agy-missing-runs-"));
+      tempDirs.push(parent);
+      const runsDir = path.join(parent, "runs-not-created");
+      const config: BridgeConfig = {
+        executable: process.execPath,
+        allowedRoots: [process.cwd(), parent],
+        sandbox: false,
+        dangerouslySkipPermissions: false,
+        defaultTimeoutMs: 5_000,
+        maxStderrBytes: 4_096,
+        dashboardEnabled: true,
+        dashboardPort: 0
+      };
+      const mgr = new WorkerManager(config, [fixture], { runsDir });
+      managers.push(mgr);
+
+      await mgr.getDashboardUrl();
+      const ds = mgr.getDashboardServer()!;
+      const res = await request({ port: ds.getPort()!, path: `/${ds.token}/api/snapshot` });
+
+      expect(res.statusCode).toBe(200);
+      const snapshot = JSON.parse(res.body);
+      expect(snapshot.jobs).toEqual([]);
+      expect(snapshot.history_store).toEqual({
+        directory: runsDir,
+        directory_exists: false,
+        fallback_directories: [],
+        job_file_count: 0
+      });
+    });
+
+    it("merges historical jobs from fallback directories when primary directory is empty", async () => {
+      const parent = mkdtempSync(path.join(tmpdir(), "agy-fallback-test-"));
+      tempDirs.push(parent);
+      const primaryRuns = path.join(parent, "primary-runs");
+      const fallbackRuns = path.join(parent, "fallback-runs");
+      mkdirSync(fallbackRuns, { recursive: true });
+
+      const testJobId = "job-from-fallback-123";
+      writeFileSync(
+        path.join(fallbackRuns, `${testJobId}.ndjson`),
+        JSON.stringify({
+          cursor: 1,
+          timestamp: new Date().toISOString(),
+          eventType: "lifecycle",
+          workerId: "worker-fallback",
+          jobId: testJobId,
+          data: {
+            state: "succeeded",
+            role: "implementer",
+            workspace: process.cwd(),
+            brief: "test job from fallback"
+          }
+        }) + "\n"
+      );
+
+      const config: BridgeConfig = {
+        executable: process.execPath,
+        allowedRoots: [process.cwd(), parent],
+        sandbox: false,
+        dangerouslySkipPermissions: false,
+        defaultTimeoutMs: 5_000,
+        maxStderrBytes: 4_096,
+        dashboardEnabled: true,
+        dashboardPort: 0
+      };
+      const mgr = new WorkerManager(config, [fixture], { runsDir: primaryRuns, fallbackRunsDirs: [fallbackRuns] });
+      managers.push(mgr);
+
+      await mgr.getDashboardUrl();
+      const ds = mgr.getDashboardServer()!;
+      const res = await request({ port: ds.getPort()!, path: `/${ds.token}/api/snapshot` });
+
+      expect(res.statusCode).toBe(200);
+      const snapshot = JSON.parse(res.body);
+      expect(snapshot.jobs.length).toBe(1);
+      expect(snapshot.jobs[0].job_id).toBe(testJobId);
+      expect(snapshot.history_store.job_file_count).toBe(1);
+      expect(snapshot.history_store.fallback_directories).toEqual([fallbackRuns]);
+    });
+
     it("returns bounded snapshot with explicit workers and historical jobs", async () => {
       const { mgr, runsDir } = makeManager();
       const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
@@ -464,6 +546,8 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
       expect(snap.jobs.length).toBe(1);
       expect(snap.jobs[0].job_id).toBe(job.jobId);
       expect(snap.jobs[0].status).toBe("succeeded");
+      expect(snap.history_store.directory_exists).toBe(true);
+      expect(snap.history_store.job_file_count).toBe(1);
       expect(snap.latest_cursor).toBeGreaterThan(0);
     });
 

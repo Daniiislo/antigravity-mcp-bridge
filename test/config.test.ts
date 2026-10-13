@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig, resolveAllowedWorkspace, resolveDefaultRunsDir } from "../src/config.js";
+import { loadConfig, resolveAllowedWorkspace, resolveCandidateRunsDirs, resolveDefaultRunsDir } from "../src/config.js";
 
 const created: string[] = [];
 afterEach(() => {
@@ -55,6 +55,28 @@ describe("configuration", () => {
       .toBe("/var/state/ada/antigravity-mcp-bridge/runs");
     expect(resolveDefaultRunsDir({}, "linux", "/home/ada"))
       .toBe("/home/ada/.local/state/antigravity-mcp-bridge/runs");
+  });
+
+  it("discovers candidate runs directories including Windows packaged sandbox storage", () => {
+    const fakeHome = mkdtempSync(path.join(tmpdir(), "fake-user-home-"));
+    created.push(fakeHome);
+    const fakePackageRuns = path.join(
+      fakeHome,
+      "AppData",
+      "Local",
+      "Packages",
+      "OpenAI.Codex_abc123",
+      "LocalCache",
+      "Local",
+      "antigravity-mcp-bridge",
+      "runs"
+    );
+    mkdirSync(fakePackageRuns, { recursive: true });
+
+    const candidates = resolveCandidateRunsDirs(undefined, {}, "win32", fakeHome);
+    expect(candidates.length).toBeGreaterThanOrEqual(2);
+    expect(candidates[0]).toBe(path.win32.join(fakeHome, "AppData", "Local", "antigravity-mcp-bridge", "runs"));
+    expect(candidates).toContain(fakePackageRuns);
   });
 
   it("lets AGY_RUNS_DIR fully override the shared default", () => {

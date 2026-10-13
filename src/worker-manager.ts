@@ -1,7 +1,7 @@
 import { createHash, randomInt } from "node:crypto";
 import { normalizeDeniedAction, type AgyTerminalResult, type AgyUsage, type DelegationResult } from "./agy-protocol.js";
 import { AgyBudgetError, AgyTimeoutError, AgyWorker, type AgyWorkerRawEvent, type BudgetKind, type TimeoutKind, type WorkerStatus } from "./agy-worker.js";
-import { resolveAllowedWorkspace, resolveDefaultRunsDir, type BridgeConfig, type Role } from "./config.js";
+import { resolveAllowedWorkspace, resolveCandidateRunsDirs, resolveDefaultRunsDir, type BridgeConfig, type Role } from "./config.js";
 import {
   boundStepEvent,
   boundText,
@@ -170,6 +170,7 @@ export class WorkerManager {
   private readonly eventStore: EventStore;
   private readonly modelCatalog: ModelCatalog;
   private readonly runsDir: string;
+  private readonly fallbackRunsDirs: string[];
   private dashboardServer?: DashboardServer | undefined;
   // Random numeric seeds retain the public ID format while preventing separate
   // MCP processes from generating the same IDs in a shared runs directory.
@@ -179,14 +180,34 @@ export class WorkerManager {
   constructor(
     private readonly config: BridgeConfig,
     private readonly prefixArgs: string[] = config.baseArgs ?? [],
-    options?: { runsDir?: string | undefined }
+    options?: { runsDir?: string | undefined; fallbackRunsDirs?: string[] | undefined }
   ) {
-    this.runsDir = options?.runsDir || config.runsDir || resolveDefaultRunsDir();
-    this.eventStore = new EventStore({ runsDir: this.runsDir, maxFieldBytes: config.maxStderrBytes });
+    const explicitRunsDir = options?.runsDir || config.runsDir;
+    if (explicitRunsDir) {
+      this.runsDir = explicitRunsDir;
+      this.fallbackRunsDirs = options?.fallbackRunsDirs ?? [];
+    } else {
+      const candidateDirs = resolveCandidateRunsDirs();
+      this.runsDir = candidateDirs[0] || resolveDefaultRunsDir();
+      this.fallbackRunsDirs = options?.fallbackRunsDirs ?? candidateDirs.slice(1);
+    }
+    this.eventStore = new EventStore({
+      runsDir: this.runsDir,
+      fallbackRunsDirs: this.fallbackRunsDirs,
+      maxFieldBytes: config.maxStderrBytes
+    });
     this.modelCatalog = new ModelCatalog({
       executable: config.executable,
       prefixArgs: this.prefixArgs
     });
+  }
+
+  getRunsDir(): string {
+    return this.runsDir;
+  }
+
+  getFallbackRunsDirs(): string[] {
+    return this.fallbackRunsDirs;
   }
 
   async listModels(options?: { refresh?: boolean | undefined }): Promise<ListModelsResult> {

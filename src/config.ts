@@ -1,4 +1,4 @@
-import { realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { resolveAgyExecutable, type ResolveExecutableOptions } from "./resolve-executable.js";
@@ -45,6 +45,72 @@ export function resolveDefaultRunsDir(
   const xdgStateHome = env.XDG_STATE_HOME?.trim();
   const base = xdgStateHome || path.posix.join(homeDirectory, ".local", "state");
   return path.posix.join(base, "antigravity-mcp-bridge", "runs");
+}
+
+export function resolveCandidateRunsDirs(
+  configuredRunsDir?: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  homeDirectory = homedir()
+): string[] {
+  if (configuredRunsDir) {
+    return [configuredRunsDir];
+  }
+  if (env.AGY_RUNS_DIR) {
+    return [env.AGY_RUNS_DIR];
+  }
+
+  const primary = resolveDefaultRunsDir(env, platform, homeDirectory);
+  const candidates: string[] = [primary];
+
+  if (platform === "win32") {
+    // When Codex Desktop runs on Windows, Windows Desktop Bridge (MSIX) virtualizes
+    // LOCALAPPDATA into the package LocalCache folder. Detect this folder so that
+    // external terminal tools like `npm run dashboard` can see Codex's runs.
+    try {
+      const packagesDir = path.win32.join(homeDirectory, "AppData", "Local", "Packages");
+      if (existsSync(packagesDir)) {
+        const entries = readdirSync(packagesDir);
+        for (const entry of entries) {
+          if (entry.toLowerCase().startsWith("openai.codex_")) {
+            const codexRuns = path.win32.join(packagesDir, entry, "LocalCache", "Local", "antigravity-mcp-bridge", "runs");
+            if (existsSync(codexRuns) && !candidates.some((c) => c.toLowerCase() === codexRuns.toLowerCase())) {
+              candidates.push(codexRuns);
+            }
+          }
+        }
+      }
+    } catch {
+      // Ignore filesystem errors while scanning candidate sandbox packages
+    }
+
+    // Also check standard native AppData\Local if primary runsDir was set to package or another folder
+    try {
+      const nativeStandard = path.win32.join(homeDirectory, "AppData", "Local", "antigravity-mcp-bridge", "runs");
+      if (existsSync(nativeStandard) && !candidates.some((c) => c.toLowerCase() === nativeStandard.toLowerCase())) {
+        candidates.push(nativeStandard);
+      }
+    } catch {
+      // Ignore
+    }
+
+    // Also check legacy Codex plugin cache if present
+    try {
+      const pluginCacheBase = path.win32.join(homeDirectory, ".codex", "plugins", "cache", "local-marketplace", "antigravity-mcp-bridge");
+      if (existsSync(pluginCacheBase)) {
+        for (const ver of readdirSync(pluginCacheBase)) {
+          const legacyRuns = path.win32.join(pluginCacheBase, ver, ".antigravity-bridge", "runs");
+          if (existsSync(legacyRuns) && !candidates.some((c) => c.toLowerCase() === legacyRuns.toLowerCase())) {
+            candidates.push(legacyRuns);
+          }
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  return candidates;
 }
 
 function booleanValue(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {

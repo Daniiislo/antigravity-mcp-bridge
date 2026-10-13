@@ -1,5 +1,6 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import { existsSync, readdirSync } from "node:fs";
 import type { Socket } from "node:net";
 import type { WorkerManager } from "./worker-manager.js";
 import type { EventStore, NormalizedEvent } from "./event-store.js";
@@ -319,9 +320,25 @@ export class DashboardServer {
       const history = await this.manager.getHistory({ limit: 100 });
       const eventsRes = this.eventStore.getEvents({ limit: 1 });
 
+      const fallbackDirs = this.manager.getFallbackRunsDirs ? this.manager.getFallbackRunsDirs() : [];
+      let totalJobFileCount = existsSync(this.runsDir)
+        ? readdirSync(this.runsDir).filter((name) => name.endsWith(".ndjson")).length
+        : 0;
+      for (const fb of fallbackDirs) {
+        if (existsSync(fb)) {
+          totalJobFileCount += readdirSync(fb).filter((name) => name.endsWith(".ndjson")).length;
+        }
+      }
+
       const snapshot = {
         workers: explicitWorkers,
         jobs: history.jobs,
+        history_store: {
+          directory: this.runsDir,
+          directory_exists: existsSync(this.runsDir),
+          fallback_directories: fallbackDirs.filter(existsSync),
+          job_file_count: totalJobFileCount
+        },
         latest_cursor: eventsRes.latest_cursor
       };
 
