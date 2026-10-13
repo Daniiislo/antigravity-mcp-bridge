@@ -67,13 +67,14 @@ export function resolveCandidateRunsDirs(
     // When Codex Desktop runs on Windows, Windows Desktop Bridge (MSIX) virtualizes
     // LOCALAPPDATA into the package LocalCache folder. Detect this folder so that
     // external terminal tools like `npm run dashboard` can see Codex's runs.
+    const pathMod = process.platform === "win32" ? path.win32 : path;
     try {
-      const packagesDir = path.win32.join(homeDirectory, "AppData", "Local", "Packages");
+      const packagesDir = pathMod.join(homeDirectory, "AppData", "Local", "Packages");
       if (existsSync(packagesDir)) {
         const entries = readdirSync(packagesDir);
         for (const entry of entries) {
           if (entry.toLowerCase().startsWith("openai.codex_")) {
-            const codexRuns = path.win32.join(packagesDir, entry, "LocalCache", "Local", "antigravity-mcp-bridge", "runs");
+            const codexRuns = pathMod.join(packagesDir, entry, "LocalCache", "Local", "antigravity-mcp-bridge", "runs");
             if (existsSync(codexRuns) && !candidates.some((c) => c.toLowerCase() === codexRuns.toLowerCase())) {
               candidates.push(codexRuns);
             }
@@ -86,7 +87,7 @@ export function resolveCandidateRunsDirs(
 
     // Also check standard native AppData\Local if primary runsDir was set to package or another folder
     try {
-      const nativeStandard = path.win32.join(homeDirectory, "AppData", "Local", "antigravity-mcp-bridge", "runs");
+      const nativeStandard = pathMod.join(homeDirectory, "AppData", "Local", "antigravity-mcp-bridge", "runs");
       if (existsSync(nativeStandard) && !candidates.some((c) => c.toLowerCase() === nativeStandard.toLowerCase())) {
         candidates.push(nativeStandard);
       }
@@ -96,10 +97,10 @@ export function resolveCandidateRunsDirs(
 
     // Also check legacy Codex plugin cache if present
     try {
-      const pluginCacheBase = path.win32.join(homeDirectory, ".codex", "plugins", "cache", "local-marketplace", "antigravity-mcp-bridge");
+      const pluginCacheBase = pathMod.join(homeDirectory, ".codex", "plugins", "cache", "local-marketplace", "antigravity-mcp-bridge");
       if (existsSync(pluginCacheBase)) {
         for (const ver of readdirSync(pluginCacheBase)) {
-          const legacyRuns = path.win32.join(pluginCacheBase, ver, ".antigravity-bridge", "runs");
+          const legacyRuns = pathMod.join(pluginCacheBase, ver, ".antigravity-bridge", "runs");
           if (existsSync(legacyRuns) && !candidates.some((c) => c.toLowerCase() === legacyRuns.toLowerCase())) {
             candidates.push(legacyRuns);
           }
