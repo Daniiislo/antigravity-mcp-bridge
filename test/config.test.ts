@@ -79,7 +79,9 @@ describe("configuration", () => {
   it("supports an inactivity timeout plus a separate absolute cap while honoring the legacy alias", () => {
     const defaults = loadConfig({}, process.cwd(), { resolveExecutable: false });
     expect(defaults.defaultTimeoutMs).toBe(300_000);
-    expect(defaults.maxTurnTimeoutMs).toBe(1_800_000);
+    expect(defaults.maxTurnTimeoutMs).toBe(600_000);
+    expect(defaults.maxSteps).toBeUndefined();
+    expect(defaults.maxTurnTokens).toBeUndefined();
 
     const legacy = loadConfig({ AGY_DEFAULT_TIMEOUT_SECONDS: "45" }, process.cwd(), { resolveExecutable: false });
     expect(legacy.defaultTimeoutMs).toBe(45_000);
@@ -91,6 +93,19 @@ describe("configuration", () => {
     }, process.cwd(), { resolveExecutable: false });
     expect(explicit.defaultTimeoutMs).toBe(20_000);
     expect(explicit.maxTurnTimeoutMs).toBe(120_000);
+  });
+
+  it("validates configurable step and token budgets", () => {
+    const configured = loadConfig({
+      AGY_MAX_STEPS: "24",
+      AGY_MAX_TURN_TOKENS: "30000"
+    }, process.cwd(), { resolveExecutable: false });
+    expect(configured.maxSteps).toBe(24);
+    expect(configured.maxTurnTokens).toBe(30_000);
+    expect(() => loadConfig({ AGY_MAX_STEPS: "0" }, process.cwd(), { resolveExecutable: false }))
+      .toThrow(/AGY_MAX_STEPS/);
+    expect(() => loadConfig({ AGY_MAX_TURN_TOKENS: "many" }, process.cwd(), { resolveExecutable: false }))
+      .toThrow(/AGY_MAX_TURN_TOKENS/);
   });
 
   it("resolves executable with explicit AGY_BIN", () => {

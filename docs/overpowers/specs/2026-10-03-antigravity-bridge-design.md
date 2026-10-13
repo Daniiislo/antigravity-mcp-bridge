@@ -44,7 +44,7 @@ The worker parses stdout line-by-line, records `init` and `step_update` metadata
 - `list_models(refresh?)`: return parsed model choices and cache metadata.
 - `create_worker(role, workspace, model?, effort?, constraints?)`: create an idle worker and return `worker_id`.
 - `dispatch_task(worker_id, brief)`: enqueue work and return `job_id` immediately.
-- `wait_task(job_id, wait_seconds?)`: bounded wait (up to 60s) for terminal state. A non-terminal heartbeat returns compact elapsed/activity/progress fields and leaves the job running.
+- `wait_task(job_id)`: one abortable wait until terminal state, returning the compact result without model-driven polling.
 - `send_followup(worker_id, finding)`: enqueue related work in the same conversation.
 - `inspect_task(job_id)`: return job metadata, tool/step events, errors, denied actions, usage, and handoff/result.
 - `cancel_task(job_id)`: cancel queued work; canceling active work terminates its process and invalidates that worker conversation.
@@ -56,7 +56,7 @@ The original `agy_delegate`, `agy_status`, `agy_stop`, and `agy_reset` remain co
 
 ### Job states
 
-`queued → running → succeeded | failed | canceled`. Each event receives a monotonically increasing cursor within the server. Public `wait_task` never waits longer than 60 seconds and returns immediately when the job is terminal. Internal event-wait helpers remain available for deterministic tests and diagnostics.
+`queued → running → succeeded | failed | canceled`. Each event receives a monotonically increasing cursor within the server. Public `wait_task` remains pending until terminal state or caller abort; internal bounded event-wait helpers remain available for deterministic tests and diagnostics.
 
 ### `agy_stop`
 
@@ -88,7 +88,9 @@ Stops the selected worker and removes its in-memory state. The next delegation s
 - `AGY_SANDBOX`: boolean, default false.
 - `AGY_DANGEROUSLY_SKIP_PERMISSIONS`: boolean, default false.
 - `AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS`: default 300; resets on structured progress.
-- `AGY_MAX_TURN_SECONDS`: default 1800 absolute wall-clock cap.
+- `AGY_MAX_TURN_SECONDS`: default 600 absolute wall-clock cap.
+- `AGY_MAX_STEPS`: optional observed logical-step budget.
+- `AGY_MAX_TURN_TOKENS`: optional observed streamed model-token budget; excludes cache-read and may overshoot upstream.
 - `AGY_DEFAULT_TIMEOUT_SECONDS`: legacy inactivity-timeout alias.
 - `AGY_MAX_STDERR_BYTES`: default 32768.
 

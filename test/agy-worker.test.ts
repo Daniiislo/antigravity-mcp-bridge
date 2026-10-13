@@ -50,6 +50,24 @@ function processExists(pid: number): boolean {
 }
 
 describe("AgyWorker", () => {
+  it("binds fresh sessions explicitly and disables slash expansion", async () => {
+    const result = await createWorker().delegate("ARGUMENTS");
+    const args = JSON.parse(result.response) as string[];
+    expect(args).toContain("--new-project");
+    expect(args).toContain("--disable-slash-commands");
+    expect(args[args.indexOf("--add-dir") + 1]).toBe(process.cwd());
+  });
+
+  it("does not charge duplicate DONE usage twice", async () => {
+    const worker = createWorker();
+    const result = await worker.delegate("DUPLICATE_USAGE", { maxTokens: 5, maxSteps: 3 });
+    expect(result.response).toBe("duplicate handled");
+  });
+
+  it("counts unindexed completed steps conservatively instead of bypassing the budget", async () => {
+    await expect(createWorker().delegate("ANONYMOUS_STEPS", { maxSteps: 3 }))
+      .rejects.toMatchObject({ budgetKind: "steps" });
+  });
   it("reuses one process and conversation for ordered turns", async () => {
     const worker = createWorker();
     const first = await worker.delegate("one");
@@ -106,6 +124,9 @@ describe("AgyWorker", () => {
 
     const measurable = await worker.delegate("measurable-again");
     expect(measurable.usage?.total_tokens).toBe(2);
+    const resumedArgs = JSON.parse((await worker.delegate("ARGUMENTS")).response) as string[];
+    expect(resumedArgs).not.toContain("--new-project");
+    expect(resumedArgs[resumedArgs.indexOf("--conversation") + 1]).toBe(first.conversationId);
   });
 
   it("resets the inactivity timeout when meaningful progress arrives", async () => {
@@ -124,6 +145,28 @@ describe("AgyWorker", () => {
       inactivityTimeoutMs: 200,
       maxDurationMs: 350
     })).rejects.toMatchObject({ timeoutKind: "max_duration" });
+    expect(worker.status().state).toBe("stopped");
+  });
+
+  it("stops before starting a step beyond the configured step budget", async () => {
+    const worker = createWorker();
+    await expect(worker.delegate("BUDGET_LOOP:10:15:1", {
+      inactivityTimeoutMs: 500,
+      maxDurationMs: 2_000,
+      maxSteps: 3,
+      maxTokens: 100
+    })).rejects.toMatchObject({ budgetKind: "steps" });
+    expect(worker.status().state).toBe("stopped");
+  });
+
+  it("stops before another step after streamed token usage reaches the budget", async () => {
+    const worker = createWorker();
+    await expect(worker.delegate("BUDGET_LOOP:10:15:3", {
+      inactivityTimeoutMs: 500,
+      maxDurationMs: 2_000,
+      maxSteps: 100,
+      maxTokens: 5
+    })).rejects.toMatchObject({ budgetKind: "tokens" });
     expect(worker.status().state).toBe("stopped");
   });
 

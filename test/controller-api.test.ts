@@ -59,6 +59,16 @@ describe("Controller API (Tasks 5-7)", () => {
       expect(worker.status).toBe("idle");
     });
 
+    it("preserves CLI effort defaults and explicit overrides", async () => {
+      const { mgr } = makeManager();
+      const tester = await mgr.createWorker({ role: "tester", workspace: process.cwd() });
+      const implementer = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
+      const overridden = await mgr.createWorker({ role: "tester", workspace: process.cwd(), effort: "high" });
+      expect(tester.effort).toBeUndefined();
+      expect(implementer.effort).toBeUndefined();
+      expect(overridden.effort).toBe("high");
+    });
+
     it("rejects workspace outside allowed roots", async () => {
       const { mgr } = makeManager();
       const outside = path.dirname(tmpdir());
@@ -70,6 +80,65 @@ describe("Controller API (Tasks 5-7)", () => {
   });
 
   describe("dispatch_task and wait_task", () => {
+    it("deduplicates a request key and rejects a conflicting retry", async () => {
+      const { mgr } = makeManager();
+      const worker = await mgr.createWorker({ role: "tester", workspace: process.cwd() });
+      const first = await mgr.dispatchTask(worker.workerId, "DELAY:100:once", undefined, undefined, { requestKey: "retry-1" });
+      const retry = await mgr.dispatchTask(worker.workerId, "DELAY:100:once", undefined, undefined, { requestKey: "retry-1" });
+      expect(retry.jobId).toBe(first.jobId);
+      await expect(mgr.dispatchTask(worker.workerId, "different", undefined, undefined, { requestKey: "retry-1" }))
+        .rejects.toThrow(/conflicting/i);
+      await mgr.waitTaskUntilTerminal(first.jobId);
+      expect((await mgr.getHistory()).jobs).toHaveLength(1);
+    });
+
+    it("deduplicates concurrent retries and recovers completed identity after restart", async () => {
+      const { mgr, runsDir } = makeManager();
+      const worker = await mgr.createWorker({ role: "tester", workspace: process.cwd() });
+      const args = [worker.workerId, "DELAY:100:concurrent", undefined, undefined, { requestKey: "concurrent" }] as const;
+      const [first, second] = await Promise.all([mgr.dispatchTask(...args), mgr.dispatchTask(...args)]);
+      expect(second.jobId).toBe(first.jobId);
+      await mgr.waitTaskUntilTerminal(first.jobId);
+      const restarted = new WorkerManager((mgr as any).config, [fixture], { runsDir });
+      managers.push(restarted);
+      expect((await restarted.dispatchTask(...args)).jobId).toBe(first.jobId);
+    });
+
+    it("does not redispatch an orphaned retry after restart", async () => {
+      const { mgr, runsDir } = makeManager();
+      const worker = await mgr.createWorker({ role: "tester", workspace: process.cwd() });
+      const args = [worker.workerId, "DELAY:250:orphan", undefined, undefined, { requestKey: "orphan" }] as const;
+      const original = await mgr.dispatchTask(...args);
+      const restarted = new WorkerManager((mgr as any).config, [fixture], { runsDir });
+      managers.push(restarted);
+      await expect(restarted.dispatchTask(...args)).rejects.toThrow(/ORPHANED_JOB/);
+      await mgr.waitTaskUntilTerminal(original.jobId);
+    });
+
+    it("expires queued work without starting a second turn", async () => {
+      const { mgr } = makeManager();
+      const worker = await mgr.createWorker({ role: "tester", workspace: process.cwd() });
+      const first = await mgr.dispatchTask(worker.workerId, "DELAY:250:first");
+      const queued = await mgr.dispatchTask(worker.workerId, "must-not-run", undefined, undefined, { totalDurationSeconds: 0.05 });
+      const result = await mgr.waitTaskUntilTerminal(queued.jobId);
+      expect(result.status).toBe("failed");
+      expect(result.total_duration_seconds).toBe(0.05);
+      expect(result.deadline_at).toBeDefined();
+      expect(result.error).toMatch(/deadline.*queue/i);
+      expect(result.started_at).toBeUndefined();
+      await mgr.waitTaskUntilTerminal(first.jobId);
+    });
+
+    it("enforces a total deadline on active work", async () => {
+      const { mgr } = makeManager();
+      const worker = await mgr.createWorker({ role: "tester", workspace: process.cwd() });
+      const job = await mgr.dispatchTask(worker.workerId, "HANG", undefined, undefined, { totalDurationSeconds: 0.2 });
+      const result = await mgr.waitTaskUntilTerminal(job.jobId);
+      expect(result.status).toBe("failed");
+      expect(result.error).toMatch(/deadline/i);
+      const followup = await mgr.sendFollowup(worker.workerId, "after-deadline");
+      expect((await mgr.waitTaskUntilTerminal(followup.jobId)).status).toBe("succeeded");
+    });
     it("allows a job-specific timeout to override the worker default", async () => {
       const { mgr } = makeManager({ defaultTimeoutMs: 30 });
       const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
@@ -102,6 +171,7 @@ describe("Controller API (Tasks 5-7)", () => {
       // DELAY:100:async-test makes fake-agy take 100ms
       const job = await mgr.dispatchTask(worker.workerId, "DELAY:100:async-test");
       expect(job.jobId).toMatch(/^job-/);
+      expect(job.role).toBe("implementer");
       expect(["queued", "running"]).toContain(job.status);
 
       const waited = await mgr.waitTask(job.jobId, { waitMs: 2_000 });
@@ -127,21 +197,6 @@ describe("Controller API (Tasks 5-7)", () => {
       expect(maxDuration.timeout_kind).toBe("max_duration");
     });
 
-    it("returns a bounded heartbeat snapshot without canceling a running job", async () => {
-      const { mgr } = makeManager();
-      const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
-      const job = await mgr.dispatchTask(worker.workerId, "DELAY:250:heartbeat");
-
-      const heartbeat = await mgr.waitTaskHeartbeat(job.jobId, { waitMs: 40 });
-      expect(heartbeat.terminal).toBe(false);
-      expect(heartbeat.status).toBe("running");
-      expect(heartbeat.elapsed_seconds).toBeGreaterThan(0);
-
-      const terminal = await mgr.waitTaskHeartbeat(job.jobId, { waitMs: 2_000 });
-      expect(terminal.terminal).toBe(true);
-      expect(terminal.result).toContain("heartbeat");
-    });
-
     it("prepends worker constraints to dispatched task prompt", async () => {
       const { mgr } = makeManager();
       const worker = await mgr.createWorker({
@@ -157,6 +212,30 @@ describe("Controller API (Tasks 5-7)", () => {
       const inspected = mgr.inspectTask(job.jobId, { includePrompt: true });
       expect(inspected.effective_prompt).toContain("MUST NOT USE ANY");
       expect(inspected.effective_prompt).toContain("test prompt");
+    });
+
+    it("states and enforces configured execution budgets in the effective prompt", async () => {
+      const { mgr, runsDir } = makeManager({ maxSteps: 3, maxTurnTokens: 100 });
+      const worker = await mgr.createWorker({ role: "tester", workspace: process.cwd() });
+      const job = await mgr.dispatchTask(worker.workerId, "BUDGET_LOOP:10:15:1");
+      const result = await mgr.waitTaskUntilTerminal(job.jobId);
+      expect(result.status).toBe("failed");
+      expect(result.budget_kind).toBe("steps");
+      expect(result.max_steps).toBe(3);
+      expect(result.max_turn_tokens).toBe(100);
+      expect(result.effective_prompt).toBeUndefined();
+
+      const diagnostic = mgr.inspectTask(job.jobId, { includePrompt: true });
+      expect(diagnostic.effective_prompt).toContain("3 steps/100 tokens max");
+      expect(diagnostic.effective_prompt).toContain("one repo-native verification path");
+
+      const config = (mgr as any).config as BridgeConfig;
+      const restarted = new WorkerManager(config, [fixture], { runsDir });
+      managers.push(restarted);
+      const persisted = restarted.inspectTask(job.jobId);
+      expect(persisted.budget_kind).toBe("steps");
+      expect(persisted.max_steps).toBe(3);
+      expect(persisted.max_turn_tokens).toBe(100);
     });
 
     it("wait_task returns immediately if job is already terminal", async () => {
@@ -843,7 +922,7 @@ describe("Controller API (Tasks 5-7)", () => {
   });
 
   describe("public MCP wait_task interface", () => {
-    it("returns bounded heartbeats for long work and a compact terminal result on the next wait", async () => {
+    it("uses one public wait until terminal and ignores legacy short-poll arguments", async () => {
       const { mgr } = makeManager();
       const server = createServer(mgr);
       const [t1, t2] = InMemoryTransport.createLinkedPair();
@@ -858,26 +937,19 @@ describe("Controller API (Tasks 5-7)", () => {
         const job = await mgr.dispatchTask(worker.workerId, "DELAY:250:mcp-wait");
 
         const start = Date.now();
-        const heartbeat = await client.callTool({
+        const res = await client.callTool({
           name: "wait_task",
           arguments: {
             job_id: job.jobId,
-            wait_seconds: 0.05
+            wait_seconds: 0.01,
+            wait_ms: 0,
+            after_cursor: 0
           }
         });
         const elapsed = Date.now() - start;
 
-        expect(heartbeat.isError).toBeFalsy();
-        expect(elapsed).toBeGreaterThanOrEqual(40);
-        const heartbeatStructured = heartbeat.structuredContent as any;
-        expect(heartbeatStructured.terminal).toBe(false);
-        expect(heartbeatStructured.status).toBe("running");
-        expect((heartbeat.content as Array<any>)[0].text).toContain("still running");
-
-        const res = await client.callTool({
-          name: "wait_task",
-          arguments: { job_id: job.jobId, wait_seconds: 1 }
-        });
+        expect(res.isError).toBeFalsy();
+        expect(elapsed).toBeGreaterThanOrEqual(200);
         const structured = res.structuredContent as any;
         expect(structured.terminal).toBe(true);
         expect(structured.status).toBe("succeeded");
@@ -885,7 +957,7 @@ describe("Controller API (Tasks 5-7)", () => {
         expect(structured.events).toBeUndefined();
 
         const textContent = (res.content as Array<any>)[0].text;
-        expect(textContent).toBe(`Job ${job.jobId} finished with status succeeded. Compact result included.`);
+        expect(textContent).toBe(`Job ${job.jobId} finished with status succeeded. Compact result included; do not call inspect_task unless diagnostics are needed.`);
       } finally {
         await client.close();
         await server.close();

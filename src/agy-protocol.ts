@@ -84,7 +84,14 @@ export interface AgyEvent {
   event: string;
   conversation_id?: string;
   init?: { cwd?: string; tools?: string[] };
-  step_update?: { step_type?: string; state?: string; text_delta?: string };
+  step_update?: {
+    step_index?: number;
+    step_type?: string;
+    state?: string;
+    text_delta?: string;
+    usage?: Partial<AgyUsage>;
+    [k: string]: unknown;
+  };
   result?: AgyTerminalResult;
 }
 

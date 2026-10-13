@@ -110,16 +110,17 @@ The preferred asynchronous workflow is:
 
 ```text
 create_worker → dispatch_task → MCP Task (when negotiated; host observes completion)
-              → wait_task (bounded heartbeat fallback; returns progress or terminal result)
+              → wait_task (single terminal fallback; no model-driven polling)
               → send_followup → close_worker
 ```
 
 | Tool | Purpose |
 | --- | --- |
 | `list_models` | Discover available Antigravity models with bounded execution and caching. |
+| `runtime_info` | Read build identity and safe execution limits once after restart; never use as a polling tool. |
 | `create_worker` | Create an isolated implementer or tester in an allowed workspace. |
 | `dispatch_task` | Queue work with optional inactivity and absolute duration limits. With negotiated MCP Tasks, return a durable task handle; otherwise return a `job_id` immediately. |
-| `wait_task` | Wait up to 55 seconds by default, returning either the compact terminal result or a compact running heartbeat. The job continues after a heartbeat or caller cancellation. |
+| `wait_task` | Hold one abortable request until terminal state and return the compact result once. The job continues if the caller cancels only the wait. |
 | `agy_events` | Diagnostic-only event polling for humans and external tooling. Never call merely because time elapsed. |
 | `inspect_task` | Read a compact result/usage/denial envelope. Prompt and step diagnostics are opt-in. |
 | `send_followup` | Continue the same worker conversation for a fix or recheck, optionally with different inactivity and absolute duration limits. A timeout resumes the saved conversation; explicit cancel/reset starts fresh. |
@@ -137,13 +138,13 @@ Four compatibility tools remain available: `agy_delegate`, `agy_status`, `agy_st
 To prevent excessive prompt token consumption in coordinating agents (such as Codex or Claude):
 
 - **Prefer negotiated MCP Tasks:** The bridge advertises the official `io.modelcontextprotocol/tasks` extension. A compatible host receives a durable task handle from `dispatch_task`, observes it outside the model turn, and gets the compact final result from `tasks/get`. This removes model-driven `wait_task` and `inspect_task` calls.
-- **Capability-safe fallback:** The bridge never returns a Task to a caller that did not declare Tasks support. Existing hosts retain the immediate enqueue response and use bounded `wait_task` heartbeats.
-- **Keep the user informed:** Call `wait_task({ job_id })`. It returns at terminal state or after `wait_seconds` (55 seconds by default) with `terminal: false`, elapsed time, last activity, and the latest bounded progress summary. After a heartbeat, update the user and wait again; do not dispatch a duplicate job. A terminal response already contains the bounded inspection result.
-- **Use an ordinary host timeout:** `wait_task` never intentionally holds longer than 60 seconds, so a 90-second MCP tool timeout is sufficient for the fallback. Route this namespace directly so Code Mode does not turn the request into raw event polling:
+- **Capability-safe fallback:** The bridge never returns a Task to a caller that did not declare Tasks support. Existing hosts retain the immediate enqueue response and make one terminal `wait_task` call; there is no fixed heartbeat loop.
+- **Wait once:** Call `wait_task({ job_id })` exactly once. Its terminal response already contains the bounded inspection result. Do not poll events, status, dashboard, or `inspect_task` unless the terminal result fails and diagnostics are needed.
+- **Set the host timeout above the worker cap:** The default absolute worker cap is 600 seconds, so a 660-second MCP tool timeout leaves cleanup margin without waking the model periodically:
 
   ```toml
   [mcp_servers.antigravity-bridge]
-  tool_timeout_sec = 90
+  tool_timeout_sec = 660
 
   [features.code_mode]
   direct_only_tool_namespaces = ["mcp__antigravity_bridge"]
@@ -215,7 +216,9 @@ The registration installer writes environment variables into the host MCP config
 | `AGY_BIN` | Auto-discovered | Exact `agy` executable or command name. |
 | `AGY_RUNS_DIR` | Per-user shared state directory | Override the NDJSON event directory. The default is `%LOCALAPPDATA%\antigravity-mcp-bridge\runs` on Windows, `~/Library/Application Support/antigravity-mcp-bridge/runs` on macOS, and `${XDG_STATE_HOME:-~/.local/state}/antigravity-mcp-bridge/runs` on Linux. |
 | `AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS` | `300` | Stop a worker after this many seconds without an `init` or `step_update` progress event. Set `inactivity_timeout_seconds` per job to override it. |
-| `AGY_MAX_TURN_SECONDS` | `1800` | Absolute wall-clock safety cap even while progress continues. Set `max_duration_seconds` per job to override it. |
+| `AGY_MAX_TURN_SECONDS` | `600` | Absolute wall-clock safety cap even while progress continues. Set `max_duration_seconds` per job to override it. |
+| `AGY_MAX_STEPS` | Unset | Optional observed step ceiling. Repeated indexed updates count once; unindexed DONE updates count conservatively. Calibrate on useful-result benchmarks. |
+| `AGY_MAX_TURN_TOKENS` | Unset | Optional observed streamed model-token ceiling, excluding cache-read. Duplicate indexed DONE usage is not charged twice. Upstream generation may overshoot before an event arrives. |
 | `AGY_DEFAULT_TIMEOUT_SECONDS` | Unset | Backward-compatible alias for the inactivity timeout, used only when `AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS` is unset. |
 | `AGY_MAX_STDERR_BYTES` | `32768` | Maximum captured stderr per worker. |
 | `AGY_MODEL` | Unset | Optional fixed model. |
@@ -237,7 +240,18 @@ History written by older versions under a workspace-local `.antigravity-bridge/r
 - If the operating system cannot confirm tree termination after the forced-kill window, the worker is poisoned: the active and queued turns fail without starting another process. Close it and create a new worker rather than risking concurrent descendants.
 - A confirmed timeout recovery restarts `agy` with the saved `--conversation`; explicit cancellation, reset, and close intentionally discard that context. An unexpected Windows root-process exit poisons the worker when descendant cleanup can no longer be confirmed.
 - Inactivity timers reset only on structured Antigravity progress, while a separate absolute cap prevents an endlessly chatty worker from running forever.
-- `wait_task` is abortable and bounded to at most 60 seconds per call. It returns compact progress without canceling the job, while negotiated MCP Tasks remain the preferred host-managed path.
+- `wait_task` is abortable but returns only at terminal state, avoiding repeated model turns. Negotiated MCP Tasks remain the preferred host-managed path.
+- When configured, a compact prompt states the observed step/token budget and asks for a concise final handoff. Effort defaults remain the CLI's choice unless explicitly overridden.
+
+### Deadline, retry, and preflight contracts
+
+`dispatch_task` and `send_followup` accept `total_duration_seconds`, measured from dispatch including queue time. It defaults to the effective maximum duration (600 seconds with default configuration). Queued expiry does not start AGY; active expiry waits for confirmed process-tree cleanup before queue advancement. Set the host timeout above this total budget plus cleanup margin. The compatibility `agy_delegate` remains a direct turn and has no manager queue deadline.
+
+Use optional `request_key` for uncertain retries with exactly the same worker, brief and explicit options. Identical retries return the original job, including after restart for completed jobs; conflicting reuse fails. A persisted nonterminal retry returns `ORPHANED_JOB` instead of starting duplicate work. Keys are scoped to a bridge history store; this is not a distributed cross-process locking guarantee. Recover the original job after waiter interruption rather than inventing a new key.
+
+`create_worker(required_tools: ["dotnet", "node"])` checks task-specific executable presence without spawning AGY. It does not check modules, permissions or command correctness. Supply exact native verification commands and relevant capability evidence in the brief. Fresh sessions use explicit project/workspace binding and disable slash-command expansion; related process recovery uses the saved conversation.
+
+For offline diagnosis, run `node scripts/analyze-runs.mjs [runs-directory]` after building. It emits aggregate timing/usage only, with no prompt, command, response or agent call. Model/tool duration sums can overlap and are not wall time. Real AGY performance and host Tasks negotiation still require runtime evidence; deterministic fixture tests do not establish a latency-saving percentage.
 - MCP Tasks uses the official `@modelcontextprotocol/ext-tasks` V2 schemas. The Antigravity `job_id` is the durable MCP `taskId`; terminal `tasks/get` responses include the same bounded inspection payload that previously required a separate `inspect_task` call.
 - Inspection, stderr, model output, and persisted fields are bounded.
 - Environment variables are excluded from event logs.

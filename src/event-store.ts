@@ -139,6 +139,8 @@ export interface CleanJobsResult {
 }
 
 export interface JobHistorySummary {
+  request_key?: string | undefined;
+  request_fingerprint?: string | undefined;
   job_id: string;
   worker_id: string;
   role: string;
@@ -153,6 +155,9 @@ export interface JobHistorySummary {
   usage?: AgyUsage | undefined;
   cumulative_usage?: AgyUsage | undefined;
   timeout_kind?: "inactivity" | "max_duration" | undefined;
+  budget_kind?: "steps" | "tokens" | undefined;
+  max_steps?: number | undefined;
+  max_turn_tokens?: number | undefined;
   result?: string | undefined;
   error?: string | undefined;
 }
@@ -266,6 +271,8 @@ export class EventStore extends EventEmitter {
         let workspace = "";
         let status = "queued";
         let brief = "";
+        let requestKey: string | undefined;
+        let requestFingerprint: string | undefined;
         let createdAt = "";
         let startedAt: string | undefined;
         let finishedAt: string | undefined;
@@ -275,6 +282,9 @@ export class EventStore extends EventEmitter {
         let cumulativeUsage: AgyUsage | undefined;
         let hasModernCumulativeUsage = false;
         let timeoutKind: "inactivity" | "max_duration" | undefined;
+        let budgetKind: "steps" | "tokens" | undefined;
+        let maxSteps: number | undefined;
+        let maxTurnTokens: number | undefined;
         let result: string | undefined;
         let error: string | undefined;
 
@@ -291,8 +301,12 @@ export class EventStore extends EventEmitter {
               if (state === "queued") {
                 if (d.role) role = String(d.role);
                 if (d.workspace) workspace = String(d.workspace);
+                if (typeof d.request_key === "string") requestKey = d.request_key;
+                if (typeof d.request_fingerprint === "string") requestFingerprint = d.request_fingerprint;
                 if (d.brief) brief = String(d.brief);
                 else if (d.task && !brief) brief = String(d.task);
+                if (typeof d.max_steps === "number") maxSteps = d.max_steps;
+                if (typeof d.max_turn_tokens === "number") maxTurnTokens = d.max_turn_tokens;
                 if (!createdAt) createdAt = (d.created_at as string) || evt.timestamp;
                 status = "queued";
               } else if (state === "started" || state === "running") {
@@ -315,6 +329,7 @@ export class EventStore extends EventEmitter {
                 if (typeof d.error === "string") error = d.error;
                 if (typeof d.duration_seconds === "number") durationSeconds = d.duration_seconds;
                 if (d.timeout_kind === "inactivity" || d.timeout_kind === "max_duration") timeoutKind = d.timeout_kind;
+                if (d.budget_kind === "steps" || d.budget_kind === "tokens") budgetKind = d.budget_kind;
               } else if (state === "canceled") {
                 status = "canceled";
                 finishedAt = (d.finished_at as string) || evt.timestamp;
@@ -347,6 +362,7 @@ export class EventStore extends EventEmitter {
 
         if (jobId) {
           summaries.push({
+            ...(requestKey ? { request_key: requestKey, request_fingerprint: requestFingerprint } : {}),
             job_id: jobId,
             worker_id: workerId,
             role,
@@ -361,6 +377,9 @@ export class EventStore extends EventEmitter {
             ...(usage ? { usage } : {}),
             ...(cumulativeUsage ? { cumulative_usage: cumulativeUsage } : {}),
             ...(timeoutKind ? { timeout_kind: timeoutKind } : {}),
+            ...(budgetKind ? { budget_kind: budgetKind } : {}),
+            ...(maxSteps !== undefined ? { max_steps: maxSteps } : {}),
+            ...(maxTurnTokens !== undefined ? { max_turn_tokens: maxTurnTokens } : {}),
             ...(result ? { result } : {}),
             ...(error ? { error } : {})
           });
@@ -472,6 +491,8 @@ export class EventStore extends EventEmitter {
     jobId: string,
     options?: { stepOffset?: number | undefined; stepLimit?: number | undefined }
   ): {
+    deadline_at?: string | undefined;
+    total_duration_seconds?: number | undefined;
     job_id: string;
     worker_id: string;
     role: "implementer" | "tester";
@@ -486,8 +507,11 @@ export class EventStore extends EventEmitter {
     cli_duration_seconds?: number | undefined;
     inactivity_timeout_seconds?: number | undefined;
     max_duration_seconds?: number | undefined;
+    max_steps?: number | undefined;
+    max_turn_tokens?: number | undefined;
     conversation_id?: string | undefined;
     timeout_kind?: "inactivity" | "max_duration" | undefined;
+    budget_kind?: "steps" | "tokens" | undefined;
     last_activity_at?: string | undefined;
     last_progress?: string | undefined;
     total_steps: number;
@@ -535,7 +559,12 @@ export class EventStore extends EventEmitter {
       let conversationId: string | undefined;
       let inactivityTimeoutSeconds: number | undefined;
       let maxDurationSeconds: number | undefined;
+      let deadlineAt: string | undefined;
+      let totalDurationSeconds: number | undefined;
+      let maxSteps: number | undefined;
+      let maxTurnTokens: number | undefined;
       let timeoutKind: "inactivity" | "max_duration" | undefined;
+      let budgetKind: "steps" | "tokens" | undefined;
       let lastActivityAt: string | undefined;
       let lastProgress: string | undefined;
       const stepEvents: Array<{
@@ -568,6 +597,10 @@ export class EventStore extends EventEmitter {
               if (typeof d.inactivity_timeout_seconds === "number") inactivityTimeoutSeconds = d.inactivity_timeout_seconds;
               else if (typeof d.timeout_seconds === "number") inactivityTimeoutSeconds = d.timeout_seconds;
               if (typeof d.max_duration_seconds === "number") maxDurationSeconds = d.max_duration_seconds;
+              if (typeof d.deadline_at === "string") deadlineAt = d.deadline_at;
+              if (typeof d.total_duration_seconds === "number") totalDurationSeconds = d.total_duration_seconds;
+              if (typeof d.max_steps === "number") maxSteps = d.max_steps;
+              if (typeof d.max_turn_tokens === "number") maxTurnTokens = d.max_turn_tokens;
               if (!createdAt) createdAt = (d.created_at as string) || evt.timestamp;
               status = "queued";
             } else if (state === "started" || state === "running") {
@@ -591,6 +624,7 @@ export class EventStore extends EventEmitter {
               if (typeof d.error === "string") error = d.error;
               if (typeof d.duration_seconds === "number") durationSeconds = d.duration_seconds;
               if (d.timeout_kind === "inactivity" || d.timeout_kind === "max_duration") timeoutKind = d.timeout_kind;
+              if (d.budget_kind === "steps" || d.budget_kind === "tokens") budgetKind = d.budget_kind;
             } else if (state === "canceled") {
               status = "canceled";
               finishedAt = (d.finished_at as string) || evt.timestamp;
@@ -685,6 +719,7 @@ export class EventStore extends EventEmitter {
 
       return {
         job_id: jobId,
+        ...(deadlineAt ? { deadline_at: deadlineAt, total_duration_seconds: totalDurationSeconds } : {}),
         worker_id: workerId,
         role,
         workspace,
@@ -698,8 +733,11 @@ export class EventStore extends EventEmitter {
         ...(cliDurationSeconds !== undefined ? { cli_duration_seconds: cliDurationSeconds } : {}),
         ...(inactivityTimeoutSeconds !== undefined ? { inactivity_timeout_seconds: inactivityTimeoutSeconds } : {}),
         ...(maxDurationSeconds !== undefined ? { max_duration_seconds: maxDurationSeconds } : {}),
+        ...(maxSteps !== undefined ? { max_steps: maxSteps } : {}),
+        ...(maxTurnTokens !== undefined ? { max_turn_tokens: maxTurnTokens } : {}),
         ...(conversationId ? { conversation_id: conversationId } : {}),
         ...(timeoutKind ? { timeout_kind: timeoutKind } : {}),
+        ...(budgetKind ? { budget_kind: budgetKind } : {}),
         ...(lastActivityAt ? { last_activity_at: lastActivityAt } : {}),
         ...(lastProgress ? { last_progress: lastProgress } : {}),
         total_steps: totalSteps,

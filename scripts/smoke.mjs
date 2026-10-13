@@ -2,15 +2,19 @@ import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = path.join(root, "scripts", "fixtures", "fake-agy.mjs");
+const runsDir = mkdtempSync(path.join(tmpdir(), "agy-smoke-"));
 const env = Object.fromEntries(Object.entries(process.env).filter((entry) => entry[1] !== undefined));
 Object.assign(env, {
   AGY_BIN: process.execPath,
   AGY_BASE_ARGS_JSON: JSON.stringify([fixture]),
   AGY_ALLOWED_ROOTS: root,
-  AGY_DEFAULT_TIMEOUT_SECONDS: "5"
+  AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS: "5",
+  AGY_RUNS_DIR: runsDir
 });
 
 const transport = new StdioClientTransport({
@@ -44,11 +48,17 @@ try {
     "inspect_task",
     "list_models",
     "open_dashboard",
+    "runtime_info",
     "send_followup",
     "wait_task"
   ].sort();
   if (JSON.stringify(names) !== JSON.stringify(expected)) {
     throw new Error(`unexpected tools: ${JSON.stringify(names)} vs expected: ${JSON.stringify(expected)}`);
+  }
+
+  const runtime = await client.callTool({ name: "runtime_info", arguments: {} });
+  if (runtime.isError || runtime.structuredContent?.wait_mode !== "terminal" || !runtime.structuredContent?.build_id) {
+    throw new Error("Runtime identity does not match terminal-wait build");
   }
 
   // 2. Call list_models
@@ -137,7 +147,8 @@ try {
     throw new Error(`delete_task failed: ${JSON.stringify(delRes)}`);
   }
 
-  process.stdout.write("MCP smoke test passed: all 17 tools verified, async worker lifecycle (create/dispatch/single-wait/close), open_dashboard, and delete_task completed.\n");
+  process.stdout.write("MCP smoke test passed: all 18 tools verified, runtime identity, async worker lifecycle (create/dispatch/single-wait/close), open_dashboard, and delete_task completed.\n");
 } finally {
   await client.close();
+  rmSync(runsDir, { recursive: true, force: true });
 }

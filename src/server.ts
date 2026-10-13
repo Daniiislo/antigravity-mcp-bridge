@@ -26,6 +26,11 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
 
   // --- Controller Tools ---
 
+  server.registerTool("runtime_info", {
+    description: "Read build identity and safe execution limits once after installation/restart. Diagnostic only; do not poll.",
+    inputSchema: z.object({})
+  }, () => success(manager.getRuntimeInfo(), "Bridge runtime identity and limits."));
+
   server.registerTool("list_models", {
     title: "List Antigravity Models",
     description: "List supported Antigravity models with cache metadata.",
@@ -47,13 +52,14 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
     inputSchema: z.object({
       role: roleSchema.describe("Implementer starts in accept-edits mode; tester starts in plan mode"),
       workspace: z.string().min(1).describe("Workspace directory inside AGY_ALLOWED_ROOTS"),
+      required_tools: z.array(z.string().min(1).max(64)).max(16).optional().describe("Task-specific executable names to preflight without launching AGY; module/package availability still needs native verification"),
       model: z.string().optional().describe("Optional model override"),
       effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional().describe("Optional effort override"),
       constraints: z.string().optional().describe("Optional constraints prepended to all tasks for this worker")
     })
-  }, async ({ role, workspace, model, effort, constraints }) => {
+  }, async ({ role, workspace, required_tools, model, effort, constraints }) => {
     try {
-      const result = await manager.createWorker({ role, workspace, model, effort, constraints });
+      const result = await manager.createWorker({ role, workspace, requiredTools: required_tools, model, effort, constraints });
       return success(result, `Created worker ${result.workerId} (${result.role}) in ${result.workspace}.`);
     } catch (error) {
       return failure(error);
@@ -62,10 +68,12 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
 
   server.registerTool("dispatch_task", {
     title: "Dispatch Task",
-    description: "Enqueue a task with inactivity and absolute duration limits. Returns an MCP Task when negotiated, otherwise a job ID immediately.",
+    description: "Enqueue a bounded task. Use a tester worker for review/verification and an implementer worker only for edits. Returns an MCP Task when negotiated, otherwise a job ID immediately.",
     inputSchema: z.object({
       worker_id: z.string().min(1).describe("Target worker ID"),
       brief: z.string().min(1).describe("Task brief to enqueue"),
+      request_key: z.string().min(1).max(128).optional().describe("Stable retry key; reuse with exactly the same task/options to avoid duplicate work"),
+      total_duration_seconds: z.number().positive().max(86_400).optional().describe("Deadline from dispatch including queue time; defaults to the effective maximum duration"),
       timeout_seconds: z.number().positive().max(86_400).optional()
         .describe("Deprecated alias for inactivity_timeout_seconds"),
       inactivity_timeout_seconds: z.number().positive().max(86_400).optional()
@@ -73,7 +81,7 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
       max_duration_seconds: z.number().positive().max(86_400).optional()
         .describe("Absolute wall-clock safety cap even while progress continues")
     })
-  }, async ({ worker_id, brief, timeout_seconds, inactivity_timeout_seconds, max_duration_seconds }) => {
+  }, async ({ worker_id, brief, request_key, total_duration_seconds, timeout_seconds, inactivity_timeout_seconds, max_duration_seconds }) => {
     try {
       if (timeout_seconds !== undefined && inactivity_timeout_seconds !== undefined) {
         throw new Error("Use either timeout_seconds or inactivity_timeout_seconds, not both");
@@ -82,9 +90,10 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
         worker_id,
         brief,
         inactivity_timeout_seconds ?? timeout_seconds,
-        max_duration_seconds
+        max_duration_seconds,
+        { requestKey: request_key, totalDurationSeconds: total_duration_seconds }
       );
-      return success(result, `Dispatched task ${result.jobId} to worker ${result.workerId} (status: ${result.status}).`);
+      return success(result, `Dispatched task ${result.jobId} to ${result.role} worker ${result.workerId} (status: ${result.status}).`);
     } catch (error) {
       return failure(error);
     }
@@ -92,21 +101,14 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
 
   server.registerTool("wait_task", {
     title: "Wait on Task",
-    description: "Wait for completion or one bounded heartbeat interval. A non-terminal response includes compact progress and the job keeps running; call again after updating the user.",
+    description: "Wait in one pending call until the task reaches a terminal state, then return its compact result. Do not poll or call inspect_task afterward. The host MCP tool timeout must exceed the intended task duration.",
     inputSchema: z.object({
-      job_id: z.string().min(1).describe("Job ID to wait for"),
-      wait_seconds: z.number().positive().max(60).optional()
-        .describe("Heartbeat interval before returning a running snapshot; defaults to 55 seconds")
+      job_id: z.string().min(1).describe("Job ID to wait for")
     })
-  }, async ({ job_id, wait_seconds }, context) => {
+  }, async ({ job_id }, context) => {
     try {
-      const result = await manager.waitTaskHeartbeat(job_id, {
-        waitMs: (wait_seconds ?? 55) * 1_000,
-        signal: context.mcpReq.signal
-      });
-      const summary = result.terminal
-        ? `Job ${result.job_id} finished with status ${result.status}. Compact result included.`
-        : `Job ${result.job_id} is still running after ${result.elapsed_seconds.toFixed(1)}s. ${result.last_progress ? `Latest progress: ${result.last_progress}` : "No progress event has been emitted yet."}`;
+      const result = await manager.waitTaskUntilTerminal(job_id, { signal: context.mcpReq.signal });
+      const summary = `Job ${result.job_id} finished with status ${result.status}. Compact result included; do not call inspect_task unless diagnostics are needed.`;
       return success(result, summary);
     } catch (error) {
       return failure(error);
@@ -119,6 +121,8 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
     inputSchema: z.object({
       worker_id: z.string().min(1).describe("Target worker ID"),
       finding: z.string().min(1).describe("Follow-up finding or task in the existing conversation"),
+      request_key: z.string().min(1).max(128).optional().describe("Stable key for retries of this follow-up; use a new key for new work"),
+      total_duration_seconds: z.number().positive().max(86_400).optional().describe("Deadline including queue time"),
       timeout_seconds: z.number().positive().max(86_400).optional()
         .describe("Deprecated alias for inactivity_timeout_seconds"),
       inactivity_timeout_seconds: z.number().positive().max(86_400).optional()
@@ -126,7 +130,7 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
       max_duration_seconds: z.number().positive().max(86_400).optional()
         .describe("Absolute wall-clock safety cap even while progress continues")
     })
-  }, async ({ worker_id, finding, timeout_seconds, inactivity_timeout_seconds, max_duration_seconds }) => {
+  }, async ({ worker_id, finding, request_key, total_duration_seconds, timeout_seconds, inactivity_timeout_seconds, max_duration_seconds }) => {
     try {
       if (timeout_seconds !== undefined && inactivity_timeout_seconds !== undefined) {
         throw new Error("Use either timeout_seconds or inactivity_timeout_seconds, not both");
@@ -135,7 +139,8 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
         worker_id,
         finding,
         inactivity_timeout_seconds ?? timeout_seconds,
-        max_duration_seconds
+        max_duration_seconds,
+        { requestKey: request_key, totalDurationSeconds: total_duration_seconds }
       );
       return success(result, `Enqueued follow-up ${result.jobId} on worker ${result.workerId}.`);
     } catch (error) {

@@ -37,7 +37,10 @@ process.stdout.write(JSON.stringify({ event: "init", conversation_id: conversati
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 input.on("line", (line) => {
   const message = JSON.parse(line);
-  const content = message?.message?.content;
+  const rawContent = message?.message?.content;
+  const content = typeof rawContent === "string" && rawContent.includes("\n\n[Task]\n")
+    ? rawContent.slice(rawContent.lastIndexOf("\n\n[Task]\n") + "\n\n[Task]\n".length)
+    : (typeof rawContent === "string" && rawContent.startsWith("[Task]\n") ? rawContent.slice("[Task]\n".length) : rawContent);
   turns += 1;
 
   if (content === "MALFORMED") {
@@ -59,6 +62,36 @@ input.on("line", (line) => {
     return;
   }
   if (content === "EXIT") process.exit(17);
+  if (content === "ARGUMENTS") {
+    process.stdout.write(JSON.stringify({ event: "result", result: {
+      conversation_id: conversationId, status: "SUCCESS", response: JSON.stringify(args),
+      duration_seconds: 0.01, num_turns: turns,
+      usage: { input_tokens: 1, output_tokens: 1, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 2 }
+    } }) + "\n");
+    return;
+  }
+  if (content === "DUPLICATE_USAGE") {
+    const usage = { input_tokens: 3, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 3 };
+    for (let i = 0; i < 2; i++) {
+      process.stdout.write(JSON.stringify({ event: "step_update", step_update: {
+        step_index: 1, state: "DONE", step_type: "agent_response", usage
+      } }) + "\n");
+    }
+    process.stdout.write(JSON.stringify({ event: "step_update", step_update: { step_index: 2, state: "ACTIVE", step_type: "tool" } }) + "\n");
+    process.stdout.write(JSON.stringify({ event: "result", result: {
+      conversation_id: conversationId, status: "SUCCESS", response: "duplicate handled",
+      duration_seconds: 0.01, num_turns: turns, usage
+    } }) + "\n");
+    return;
+  }
+  if (content === "ANONYMOUS_STEPS") {
+    for (let i = 0; i < 4; i++) {
+      process.stdout.write(JSON.stringify({ event: "step_update", step_update: {
+        state: "DONE", step_type: "tool", text_delta: "anonymous step"
+      } }) + "\n");
+    }
+    return;
+  }
   if (content === "HANG") return;
   if (typeof content === "string" && content.startsWith("SPAWN_CHILD_HANG:")) {
     const pidFile = content.slice("SPAWN_CHILD_HANG:".length);
@@ -168,6 +201,38 @@ input.on("line", (line) => {
         conversation_id: conversationId, status: "SUCCESS", response: `reply:${actualMsg}:${mode}`,
         duration_seconds: turns * intervalMs / 1_000, num_turns: turns,
         usage: { input_tokens: turns, output_tokens: turns, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: turns * 2 }
+      } }) + "\n");
+    }, intervalMs);
+    return;
+  }
+  if (typeof content === "string" && content.startsWith("BUDGET_LOOP:")) {
+    const match = content.match(/^BUDGET_LOOP:(\d+):(\d+):(\d+)$/);
+    const count = match ? Number(match[1]) : 10;
+    const intervalMs = match ? Number(match[2]) : 10;
+    const tokensPerStep = match ? Number(match[3]) : 3;
+    let step = 0;
+    const interval = setInterval(() => {
+      step += 1;
+      const usage = {
+        input_tokens: tokensPerStep,
+        output_tokens: 0,
+        thinking_tokens: 0,
+        cache_read_tokens: 0,
+        total_tokens: tokensPerStep
+      };
+      process.stdout.write(JSON.stringify({ event: "step_update", step_update: {
+        conversation_id: conversationId, step_index: step, state: "ACTIVE", step_type: "agent_response"
+      } }) + "\n");
+      process.stdout.write(JSON.stringify({ event: "step_update", step_update: {
+        conversation_id: conversationId, step_index: step, state: "DONE", step_type: "agent_response",
+        text_delta: `budget step ${step}`, usage
+      } }) + "\n");
+      if (step < count) return;
+      clearInterval(interval);
+      process.stdout.write(JSON.stringify({ event: "result", result: {
+        conversation_id: conversationId, status: "SUCCESS", response: "budget loop completed",
+        duration_seconds: count * intervalMs / 1_000, num_turns: turns,
+        usage: { input_tokens: count * tokensPerStep, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: count * tokensPerStep }
       } }) + "\n");
     }, intervalMs);
     return;

@@ -1,6 +1,6 @@
-import { randomInt } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 import { normalizeDeniedAction, type AgyTerminalResult, type AgyUsage, type DelegationResult } from "./agy-protocol.js";
-import { AgyTimeoutError, AgyWorker, type AgyWorkerRawEvent, type TimeoutKind, type WorkerStatus } from "./agy-worker.js";
+import { AgyBudgetError, AgyTimeoutError, AgyWorker, type AgyWorkerRawEvent, type BudgetKind, type TimeoutKind, type WorkerStatus } from "./agy-worker.js";
 import { resolveAllowedWorkspace, resolveDefaultRunsDir, type BridgeConfig, type Role } from "./config.js";
 import {
   boundStepEvent,
@@ -13,10 +13,18 @@ import {
 } from "./event-store.js";
 import { ModelCatalog, type ListModelsResult } from "./model-catalog.js";
 import { DashboardServer } from "./dashboard-server.js";
+import { checkRequiredTools } from "./preflight.js";
+import { runtimeInfo } from "./runtime-info.js";
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
+export interface DispatchOptions {
+  requestKey?: string | undefined;
+  totalDurationSeconds?: number | undefined;
+}
+
 export interface CreateWorkerOptions {
+  requiredTools?: string[] | undefined;
   role: Role;
   workspace: string;
   model?: string | undefined;
@@ -59,6 +67,13 @@ export interface JobRecord {
   effectivePrompt: string;
   timeoutMs?: number | undefined;
   maxDurationMs?: number | undefined;
+  maxSteps?: number | undefined;
+  maxTurnTokens?: number | undefined;
+  requestKey?: string | undefined;
+  requestFingerprint?: string | undefined;
+  deadlineTimer?: NodeJS.Timeout | undefined;
+  deadlineAt?: string | undefined;
+  totalDurationSeconds?: number | undefined;
   status: JobStatus;
   createdAt: string;
   startedAt?: string | undefined;
@@ -71,6 +86,7 @@ export interface JobRecord {
   error?: string | undefined;
   conversationId?: string | undefined;
   timeoutKind?: TimeoutKind | undefined;
+  budgetKind?: BudgetKind | undefined;
   lastActivityAt?: string | undefined;
   lastProgress?: string | undefined;
   stepEvents: Array<{
@@ -101,6 +117,8 @@ export interface InspectTaskOptions {
 }
 
 export interface InspectTaskResult {
+  deadline_at?: string | undefined;
+  total_duration_seconds?: number | undefined;
   job_id: string;
   worker_id: string;
   role: Role;
@@ -115,8 +133,11 @@ export interface InspectTaskResult {
   cli_duration_seconds?: number | undefined;
   inactivity_timeout_seconds?: number | undefined;
   max_duration_seconds?: number | undefined;
+  max_steps?: number | undefined;
+  max_turn_tokens?: number | undefined;
   conversation_id?: string | undefined;
   timeout_kind?: TimeoutKind | undefined;
+  budget_kind?: BudgetKind | undefined;
   last_activity_at?: string | undefined;
   last_progress?: string | undefined;
   total_steps: number;
@@ -145,6 +166,7 @@ export class WorkerManager {
   private readonly implicitWorkers = new Map<Role, AgyWorker>();
   private readonly explicitWorkers = new Map<string, ExplicitWorkerInternal>();
   private readonly jobs = new Map<string, JobRecord>();
+  private requestHistory?: Promise<JobHistorySummary[]> | undefined;
   private readonly eventStore: EventStore;
   private readonly modelCatalog: ModelCatalog;
   private readonly runsDir: string;
@@ -171,11 +193,15 @@ export class WorkerManager {
     return this.modelCatalog.listModels(options);
   }
 
+  getRuntimeInfo() { return runtimeInfo(this.config); }
+
   async createWorker(options: CreateWorkerOptions): Promise<ExplicitWorkerInfo> {
     const workspace = resolveAllowedWorkspace(options.workspace, this.config.allowedRoots);
+    checkRequiredTools(options.requiredTools ?? []);
     this.workerCounter += 1;
     const workerId = `worker-${options.role}-${Date.now()}-${this.workerCounter}`;
 
+    const effectiveEffort = options.effort ?? this.config.effort;
     const agyWorker = new AgyWorker({
       role: options.role,
       cwd: workspace,
@@ -183,12 +209,14 @@ export class WorkerManager {
       prefixArgs: this.prefixArgs,
       mode: options.role === "tester" ? "plan" : "accept-edits",
       model: options.model ?? this.config.model,
-      effort: options.effort ?? this.config.effort,
+      effort: effectiveEffort,
       ...(this.config.agent ? { agent: this.config.agent } : {}),
       sandbox: this.config.sandbox,
       dangerouslySkipPermissions: this.config.dangerouslySkipPermissions,
       defaultTimeoutMs: this.config.defaultTimeoutMs,
       ...(this.config.maxTurnTimeoutMs ? { defaultMaxTurnMs: this.config.maxTurnTimeoutMs } : {}),
+      ...(this.config.maxSteps ? { defaultMaxSteps: this.config.maxSteps } : {}),
+      ...(this.config.maxTurnTokens ? { defaultMaxTokens: this.config.maxTurnTokens } : {}),
       maxStderrBytes: this.config.maxStderrBytes,
       onRawEvent: (raw) => {
         this.handleRawWorkerEvent(workerId, raw);
@@ -200,7 +228,7 @@ export class WorkerManager {
       role: options.role,
       workspace,
       model: options.model ?? this.config.model,
-      effort: options.effort ?? this.config.effort,
+      effort: effectiveEffort,
       constraints: options.constraints,
       status: "idle",
       createdAt: new Date().toISOString(),
@@ -239,8 +267,37 @@ export class WorkerManager {
     workerId: string,
     brief: string,
     timeoutSeconds?: number | undefined,
-    maxDurationSeconds?: number | undefined
-  ): Promise<{ jobId: string; workerId: string; status: JobStatus }> {
+    maxDurationSeconds?: number | undefined,
+    options: DispatchOptions = {}
+  ): Promise<{ jobId: string; workerId: string; role: Role; status: JobStatus }> {
+    if (!brief.trim()) throw new Error("brief must not be empty");
+    if (options.requestKey !== undefined && (!options.requestKey.trim() || options.requestKey.length > 128)) {
+      throw new Error("request key must contain 1-128 characters");
+    }
+    if (options.totalDurationSeconds !== undefined && (!Number.isFinite(options.totalDurationSeconds) || options.totalDurationSeconds <= 0)) {
+      throw new Error("total duration must be positive");
+    }
+    const requestFingerprint = createHash("sha256").update(JSON.stringify({ workerId, brief, timeoutSeconds, maxDurationSeconds, totalDurationSeconds: options.totalDurationSeconds })).digest("hex");
+    if (options.requestKey) {
+      const previous = [...this.jobs.values()].find(job => job.requestKey === options.requestKey);
+      if (previous) {
+        if (previous.requestFingerprint !== requestFingerprint) throw new Error("Conflicting retry for request key");
+        return { jobId: previous.jobId, workerId: previous.workerId, role: previous.role, status: previous.status };
+      }
+      // Hydrate restart identities once, rather than rereading all logs on every dispatch.
+      this.requestHistory ??= this.eventStore.readDiskHistory({ limit: 100_000 });
+      const persisted = (await this.requestHistory).find(job => job.request_key === options.requestKey);
+      const concurrent = [...this.jobs.values()].find(job => job.requestKey === options.requestKey);
+      if (concurrent) {
+        if (concurrent.requestFingerprint !== requestFingerprint) throw new Error("Conflicting retry for request key");
+        return { jobId: concurrent.jobId, workerId: concurrent.workerId, role: concurrent.role, status: concurrent.status };
+      }
+      if (persisted) {
+        if (persisted.request_fingerprint !== requestFingerprint) throw new Error("Conflicting retry for request key");
+        if (persisted.status === "queued" || persisted.status === "running") throw new Error(`ORPHANED_JOB: ${persisted.job_id}; inspect the original job before replacement`);
+        return { jobId: persisted.job_id, workerId: persisted.worker_id, role: persisted.role as Role, status: persisted.status as JobStatus };
+      }
+    }
     const worker = this.explicitWorkers.get(workerId);
     if (!worker) {
       throw new Error(`Worker not found: ${workerId}`);
@@ -264,10 +321,15 @@ export class WorkerManager {
     this.jobCounter += 1;
     const jobId = `job-${Date.now()}-${this.jobCounter}`;
 
-    const effectivePrompt = worker.constraints
-      ? `[Constraints]\n${worker.constraints}\n\n[Task]\n${brief}`
+    const budgetInstruction = this.config.maxSteps || this.config.maxTurnTokens
+      ? `[Budget]\n${this.config.maxSteps ?? "configured"} steps/${this.config.maxTurnTokens ?? "configured"} tokens max. Use one repo-native verification path; after one missing tool, report it. Reserve a concise final response.\n\n`
+      : "";
+    const effectivePrompt = budgetInstruction || worker.constraints
+      ? `${budgetInstruction}${worker.constraints ? `[Constraints]\n${worker.constraints}\n\n` : ""}[Task]\n${brief}`
       : brief;
 
+    const totalMs = (options.totalDurationSeconds ?? effectiveMaxDurationSeconds ?? 600) * 1_000;
+    const deadlineAt = new Date(Date.now() + totalMs).toISOString();
     const job: JobRecord = {
       jobId,
       workerId,
@@ -277,6 +339,11 @@ export class WorkerManager {
       effectivePrompt,
       ...(timeoutSeconds === undefined ? {} : { timeoutMs: timeoutSeconds * 1_000 }),
       ...(maxDurationSeconds === undefined ? {} : { maxDurationMs: maxDurationSeconds * 1_000 }),
+      ...(this.config.maxSteps ? { maxSteps: this.config.maxSteps } : {}),
+      ...(this.config.maxTurnTokens ? { maxTurnTokens: this.config.maxTurnTokens } : {}),
+      ...(options.requestKey ? { requestKey: options.requestKey, requestFingerprint } : {}),
+      deadlineAt,
+      totalDurationSeconds: totalMs / 1_000,
       status: "queued",
       createdAt: new Date().toISOString(),
       stepEvents: [],
@@ -298,15 +365,30 @@ export class WorkerManager {
         effective_prompt: effectivePrompt,
         ...(timeoutSeconds === undefined ? {} : { inactivity_timeout_seconds: timeoutSeconds }),
         ...(maxDurationSeconds === undefined ? {} : { max_duration_seconds: maxDurationSeconds }),
+        ...(this.config.maxSteps ? { max_steps: this.config.maxSteps } : {}),
+        ...(this.config.maxTurnTokens ? { max_turn_tokens: this.config.maxTurnTokens } : {}),
+        ...(options.requestKey ? { request_key: options.requestKey, request_fingerprint: requestFingerprint } : {}),
+        deadline_at: deadlineAt,
+        total_duration_seconds: totalMs / 1_000,
         created_at: job.createdAt
       }
     });
 
+    job.deadlineTimer = setTimeout(() => {
+      if (job.status === "running") {
+        const error = new AgyTimeoutError("max_duration", totalMs);
+        error.message = `Total job deadline exceeded during execution after ${totalMs}ms`;
+        worker.worker.interruptActiveTurn(error);
+      } else if (job.status === "queued") {
+        this.expireQueuedJob(worker, job);
+      }
+    }, Math.max(0, Date.parse(deadlineAt) - Date.now()));
     this.processWorkerQueue(worker);
 
     return {
       jobId,
       workerId,
+      role: worker.role,
       status: job.status
     };
   }
@@ -315,62 +397,10 @@ export class WorkerManager {
     workerId: string,
     finding: string,
     timeoutSeconds?: number | undefined,
-    maxDurationSeconds?: number | undefined
-  ): Promise<{ jobId: string; workerId: string; status: JobStatus }> {
-    return this.dispatchTask(workerId, finding, timeoutSeconds, maxDurationSeconds);
-  }
-
-  async waitTaskHeartbeat(
-    jobId: string,
-    options: { waitMs?: number | undefined; signal?: AbortSignal | undefined } = {}
-  ): Promise<InspectTaskResult & { terminal: boolean; elapsed_seconds: number }> {
-    const job = this.jobs.get(jobId);
-    if (!job) {
-      const persisted = this.eventStore.readDiskJob(jobId);
-      if (!persisted) throw new Error(`Job not found: ${jobId}`);
-      if (persisted.status === "queued" || persisted.status === "running") {
-        throw new Error(`ORPHANED_JOB: ${jobId} was ${persisted.status} when the bridge stopped and cannot be resumed safely`);
-      }
-      const inspected = this.inspectTask(jobId);
-      return { ...inspected, terminal: true, elapsed_seconds: this.elapsedSeconds(inspected.started_at, inspected.finished_at) };
-    }
-
-    const isTerminal = () => job.status === "succeeded" || job.status === "failed" || job.status === "canceled";
-    const waitMs = Math.min(Math.max(options.waitMs ?? 55_000, 0), 60_000);
-    const signal = options.signal;
-    if (!isTerminal() && waitMs > 0) {
-      if (signal?.aborted) throw this.waitAbortedError(jobId);
-      await new Promise<void>((resolve, reject) => {
-        let settled = false;
-        const cleanup = () => {
-          clearTimeout(timer);
-          this.eventStore.off("event", onEvent);
-          signal?.removeEventListener("abort", onAbort);
-        };
-        const finish = (callback: () => void) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          callback();
-        };
-        const onEvent = (event: NormalizedEvent) => {
-          if (event.jobId === jobId && isTerminal()) finish(resolve);
-        };
-        const onAbort = () => finish(() => reject(this.waitAbortedError(jobId)));
-        const timer = setTimeout(() => finish(resolve), waitMs);
-        this.eventStore.on("event", onEvent);
-        signal?.addEventListener("abort", onAbort, { once: true });
-        if (isTerminal()) finish(resolve);
-        else if (signal?.aborted) onAbort();
-      });
-    }
-
-    const inspected = this.inspectTask(jobId);
-    return {
-      ...inspected,
-      terminal: isTerminal(),
-      elapsed_seconds: this.elapsedSeconds(inspected.started_at, inspected.finished_at)
-    };
+    maxDurationSeconds?: number | undefined,
+    options: DispatchOptions = {}
+  ): Promise<{ jobId: string; workerId: string; role: Role; status: JobStatus }> {
+    return this.dispatchTask(workerId, finding, timeoutSeconds, maxDurationSeconds, options);
   }
 
   async waitTask(jobId: string, options?: { waitMs?: number | undefined; afterCursor?: number | undefined }): Promise<WaitTaskResult> {
@@ -516,6 +546,7 @@ export class WorkerManager {
     const hasMoreDenied = totalDenied > slicedDenied.length;
 
     return this.compactInspection({
+      ...(job.deadlineAt ? { deadline_at: job.deadlineAt, total_duration_seconds: job.totalDurationSeconds } : {}),
       job_id: job.jobId,
       worker_id: job.workerId,
       role: job.role,
@@ -530,8 +561,11 @@ export class WorkerManager {
       ...(job.cliDurationSeconds !== undefined ? { cli_duration_seconds: job.cliDurationSeconds } : {}),
       ...(job.timeoutMs !== undefined ? { inactivity_timeout_seconds: job.timeoutMs / 1_000 } : {}),
       ...(job.maxDurationMs !== undefined ? { max_duration_seconds: job.maxDurationMs / 1_000 } : {}),
+      ...(job.maxSteps !== undefined ? { max_steps: job.maxSteps } : {}),
+      ...(job.maxTurnTokens !== undefined ? { max_turn_tokens: job.maxTurnTokens } : {}),
       ...(job.conversationId ? { conversation_id: job.conversationId } : {}),
       ...(job.timeoutKind ? { timeout_kind: job.timeoutKind } : {}),
+      ...(job.budgetKind ? { budget_kind: job.budgetKind } : {}),
       ...(job.lastActivityAt ? { last_activity_at: job.lastActivityAt } : {}),
       ...(job.lastProgress ? { last_progress: job.lastProgress } : {}),
       total_steps: totalSteps,
@@ -559,6 +593,7 @@ export class WorkerManager {
     const resultWasTruncated = (source.result?.length ?? 0) > 12_288;
     const errorWasTruncated = (source.error?.length ?? 0) > 4_096;
     const compact: Omit<InspectTaskResult, "caller_payload_chars"> = {
+      ...(source.deadline_at ? { deadline_at: source.deadline_at, total_duration_seconds: source.total_duration_seconds } : {}),
       job_id: source.job_id, worker_id: source.worker_id, role: source.role, workspace: source.workspace,
       status: source.status, created_at: source.created_at, total_steps: source.total_steps,
       total_denied_actions: source.total_denied_actions, denied_actions: source.denied_actions.slice(0, 20),
@@ -569,8 +604,11 @@ export class WorkerManager {
       ...(source.cli_duration_seconds !== undefined ? { cli_duration_seconds: source.cli_duration_seconds } : {}),
       ...(source.inactivity_timeout_seconds !== undefined ? { inactivity_timeout_seconds: source.inactivity_timeout_seconds } : {}),
       ...(source.max_duration_seconds !== undefined ? { max_duration_seconds: source.max_duration_seconds } : {}),
+      ...(source.max_steps !== undefined ? { max_steps: source.max_steps } : {}),
+      ...(source.max_turn_tokens !== undefined ? { max_turn_tokens: source.max_turn_tokens } : {}),
       ...(source.conversation_id ? { conversation_id: source.conversation_id } : {}),
       ...(source.timeout_kind ? { timeout_kind: source.timeout_kind } : {}),
+      ...(source.budget_kind ? { budget_kind: source.budget_kind } : {}),
       ...(source.last_activity_at ? { last_activity_at: source.last_activity_at } : {}),
       ...(source.last_progress ? { last_progress: source.last_progress } : {}),
       ...(source.usage ? { usage: source.usage } : {}),
@@ -615,6 +653,7 @@ export class WorkerManager {
     const isActive = worker?.activeJob?.jobId === jobId;
 
     job.status = "canceled";
+    if (job.deadlineTimer) clearTimeout(job.deadlineTimer);
     job.finishedAt = new Date().toISOString();
 
     if (isActive && worker) {
@@ -646,6 +685,7 @@ export class WorkerManager {
     worker.status = "closed";
 
     for (const qJob of worker.queue) {
+      if (qJob.deadlineTimer) clearTimeout(qJob.deadlineTimer);
       qJob.status = "canceled";
       qJob.finishedAt = new Date().toISOString();
       this.eventStore.recordEvent({
@@ -663,6 +703,7 @@ export class WorkerManager {
 
     if (worker.activeJob) {
       const activeJob = worker.activeJob;
+      if (activeJob.deadlineTimer) clearTimeout(activeJob.deadlineTimer);
       activeJob.status = "canceled";
       activeJob.finishedAt = new Date().toISOString();
       worker.worker.cancelActiveTurn("Worker was closed by controller");
@@ -731,6 +772,9 @@ export class WorkerManager {
         ...(job.usage ? { usage: job.usage } : {}),
         ...(job.cumulativeUsage ? { cumulative_usage: job.cumulativeUsage } : {}),
         ...(job.timeoutKind ? { timeout_kind: job.timeoutKind } : {}),
+        ...(job.budgetKind ? { budget_kind: job.budgetKind } : {}),
+        ...(job.maxSteps !== undefined ? { max_steps: job.maxSteps } : {}),
+        ...(job.maxTurnTokens !== undefined ? { max_turn_tokens: job.maxTurnTokens } : {}),
         ...(job.result ? { result: job.result } : {}),
         ...(job.error ? { error: job.error } : {})
       });
@@ -830,6 +874,7 @@ export class WorkerManager {
 
     const success = this.eventStore.deleteJob(jobId);
     this.jobs.delete(jobId);
+    this.requestHistory = undefined;
 
     this.eventStore.recordEvent({
       eventType: "lifecycle",
@@ -857,6 +902,7 @@ export class WorkerManager {
     };
 
     const result = await this.eventStore.cleanJobs(mergedOptions);
+    this.requestHistory = undefined;
 
     for (const id of result.deletedJobIds) {
       this.jobs.delete(id);
@@ -908,6 +954,8 @@ export class WorkerManager {
         dangerouslySkipPermissions: this.config.dangerouslySkipPermissions,
         defaultTimeoutMs: this.config.defaultTimeoutMs,
         ...(this.config.maxTurnTimeoutMs ? { defaultMaxTurnMs: this.config.maxTurnTimeoutMs } : {}),
+        ...(this.config.maxSteps ? { defaultMaxSteps: this.config.maxSteps } : {}),
+        ...(this.config.maxTurnTokens ? { defaultMaxTokens: this.config.maxTurnTokens } : {}),
         maxStderrBytes: this.config.maxStderrBytes
       });
       this.implicitWorkers.set(role, worker);
@@ -942,6 +990,7 @@ export class WorkerManager {
     const selected = role ? [role] : (["implementer", "tester"] as Role[]);
     await Promise.all(selected.map(async (item) => this.implicitWorkers.get(item)?.stop()));
     if (!role) {
+      for (const job of this.jobs.values()) if (job.deadlineTimer) clearTimeout(job.deadlineTimer);
       await Promise.all(Array.from(this.explicitWorkers.values()).map((w) => w.worker.stop()));
       if (this.dashboardServer) {
         await this.dashboardServer.stop();
@@ -1034,6 +1083,15 @@ export class WorkerManager {
     }
   }
 
+  private expireQueuedJob(worker: ExplicitWorkerInternal, job: JobRecord): void {
+    if (job.deadlineTimer) clearTimeout(job.deadlineTimer);
+    job.status = "failed";
+    job.finishedAt = new Date().toISOString();
+    job.error = "Total job deadline exceeded in queue; turn was not started";
+    worker.queue = worker.queue.filter(item => item !== job);
+    this.eventStore.recordEvent({ eventType: "lifecycle", workerId: worker.workerId, jobId: job.jobId, data: { lifecycle: "failed", finished_at: job.finishedAt, error: job.error } });
+  }
+
   private processWorkerQueue(worker: ExplicitWorkerInternal): void {
     if (worker.status === "closed") return;
     if (worker.activeJob) return;
@@ -1043,6 +1101,11 @@ export class WorkerManager {
     }
 
     const nextJob = worker.queue.shift()!;
+    if (nextJob.deadlineAt && Date.parse(nextJob.deadlineAt) <= Date.now() && nextJob.status === "queued") {
+      this.expireQueuedJob(worker, nextJob);
+      this.processWorkerQueue(worker);
+      return;
+    }
     if (nextJob.status === "canceled") {
       this.processWorkerQueue(worker);
       return;
@@ -1107,6 +1170,7 @@ export class WorkerManager {
           nextJob.durationSeconds = this.elapsedSeconds(nextJob.startedAt, nextJob.finishedAt);
           nextJob.error = err instanceof Error ? err.message : String(err);
           if (err instanceof AgyTimeoutError) nextJob.timeoutKind = err.timeoutKind;
+          if (err instanceof AgyBudgetError) nextJob.budgetKind = err.budgetKind;
 
           this.eventStore.recordEvent({
             eventType: "lifecycle",
@@ -1119,11 +1183,13 @@ export class WorkerManager {
               duration_seconds: nextJob.durationSeconds,
               error: nextJob.error,
               ...(nextJob.timeoutKind ? { timeout_kind: nextJob.timeoutKind } : {}),
+              ...(nextJob.budgetKind ? { budget_kind: nextJob.budgetKind } : {}),
               denied_actions: [...nextJob.deniedActions]
             }
           });
         }
       } finally {
+        if (nextJob.deadlineTimer) clearTimeout(nextJob.deadlineTimer);
         worker.activeJob = undefined;
         if (worker.status !== "closed") {
           worker.status = worker.queue.length > 0 ? "busy" : "idle";

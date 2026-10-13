@@ -18,6 +18,10 @@ export interface BridgeConfig {
   /** Legacy property name retained for API compatibility; now the inactivity timeout. */
   defaultTimeoutMs: number;
   maxTurnTimeoutMs?: number;
+  /** Maximum logical Antigravity steps per turn. */
+  maxSteps?: number;
+  /** Maximum streamed turn tokens observed before another step may start. */
+  maxTurnTokens?: number;
   maxStderrBytes: number;
   dashboardEnabled?: boolean;
   dashboardPort?: number;
@@ -106,11 +110,13 @@ export function loadConfig(
   const defaultTimeoutMs = (env.AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS !== undefined
     ? positiveInteger(env, "AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS", 300)
     : positiveInteger(env, "AGY_DEFAULT_TIMEOUT_SECONDS", 300)) * 1_000;
-  const maxTurnTimeoutMs = positiveInteger(env, "AGY_MAX_TURN_SECONDS", 1_800) * 1_000;
+  const maxTurnTimeoutMs = positiveInteger(env, "AGY_MAX_TURN_SECONDS", 600) * 1_000;
   if (maxTurnTimeoutMs < defaultTimeoutMs) {
     throw new Error("AGY_MAX_TURN_SECONDS must be greater than or equal to the inactivity timeout");
   }
   const maxStderrBytes = positiveInteger(env, "AGY_MAX_STDERR_BYTES", 32_768);
+  const maxSteps = env.AGY_MAX_STEPS ? positiveInteger(env, "AGY_MAX_STEPS", 48) : undefined;
+  const maxTurnTokens = env.AGY_MAX_TURN_TOKENS ? positiveInteger(env, "AGY_MAX_TURN_TOKENS", 60_000) : undefined;
   const dashboardEnabled = booleanValue(env, "AGY_DASHBOARD_ENABLED", true);
   const dashboardPort = portNumber(env, "AGY_DASHBOARD_PORT", 0);
 
@@ -153,6 +159,8 @@ export function loadConfig(
     dangerouslySkipPermissions,
     defaultTimeoutMs,
     maxTurnTimeoutMs,
+    ...(maxSteps !== undefined ? { maxSteps } : {}),
+    ...(maxTurnTokens !== undefined ? { maxTurnTokens } : {}),
     maxStderrBytes,
     dashboardEnabled,
     dashboardPort

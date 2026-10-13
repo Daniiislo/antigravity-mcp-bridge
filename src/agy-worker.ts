@@ -7,7 +7,7 @@ import { terminateProcessTree } from "./process-tree.js";
 
 export type AgyWorkerRawEvent =
   | { type: "init"; conversationId?: string | undefined; init?: { cwd?: string | undefined; tools?: string[] | undefined } | undefined }
-  | { type: "step"; stepUpdate?: { step_type?: string | undefined; state?: string | undefined; text_delta?: string | undefined; [k: string]: unknown } | undefined }
+  | { type: "step"; stepUpdate?: { step_index?: number | undefined; step_type?: string | undefined; state?: string | undefined; text_delta?: string | undefined; usage?: Partial<import("./agy-protocol.js").AgyUsage> | undefined; [k: string]: unknown } | undefined }
   | { type: "result"; result: AgyTerminalResult }
   | { type: "stderr"; text: string };
 
@@ -24,6 +24,8 @@ export interface AgyWorkerOptions {
   dangerouslySkipPermissions: boolean;
   defaultTimeoutMs: number;
   defaultMaxTurnMs?: number | undefined;
+  defaultMaxSteps?: number | undefined;
+  defaultMaxTokens?: number | undefined;
   maxStderrBytes: number;
   terminateTree?: ((child: ChildProcessWithoutNullStreams) => Promise<void>) | undefined;
   onRawEvent?: ((event: AgyWorkerRawEvent) => void) | undefined;
@@ -48,6 +50,12 @@ interface PendingTurn {
   startedAtMs: number;
   inactivityTimeoutMs: number;
   maxDurationMs: number;
+  maxSteps: number;
+  maxTokens: number;
+  observedStepIds: Set<string>;
+  observedTokens: number;
+  stepTokenUsage: Map<string, number>;
+  anonymousSteps: number;
   inactivityTimer?: NodeJS.Timeout | undefined;
   maxDurationTimer?: NodeJS.Timeout | undefined;
 }
@@ -55,6 +63,8 @@ interface PendingTurn {
 export interface DelegationTimeouts {
   inactivityTimeoutMs?: number | undefined;
   maxDurationMs?: number | undefined;
+  maxSteps?: number | undefined;
+  maxTokens?: number | undefined;
 }
 
 export type TimeoutKind = "inactivity" | "max_duration";
@@ -67,6 +77,19 @@ export class AgyTimeoutError extends Error {
     super(`Antigravity turn timed out due to ${label} after ${milliseconds}ms`);
     this.name = "AgyTimeoutError";
     this.timeoutKind = kind;
+  }
+}
+
+export type BudgetKind = "steps" | "tokens";
+
+export class AgyBudgetError extends Error {
+  readonly budgetKind: BudgetKind;
+
+  constructor(kind: BudgetKind, limit: number) {
+    const label = kind === "steps" ? "logical steps" : "observed turn tokens";
+    super(`Antigravity turn reached the ${label} budget (${limit}) before completion`);
+    this.name = "AgyBudgetError";
+    this.budgetKind = kind;
   }
 }
 
@@ -114,6 +137,12 @@ export class AgyWorker {
     const maxDurationMs = typeof timeouts === "number"
       ? (this.options.defaultMaxTurnMs ?? Math.max(this.options.defaultTimeoutMs * 4, inactivityTimeoutMs))
       : (timeouts.maxDurationMs ?? this.options.defaultMaxTurnMs ?? Math.max(this.options.defaultTimeoutMs * 4, inactivityTimeoutMs));
+    const maxSteps = typeof timeouts === "number"
+      ? (this.options.defaultMaxSteps ?? Number.POSITIVE_INFINITY)
+      : (timeouts.maxSteps ?? this.options.defaultMaxSteps ?? Number.POSITIVE_INFINITY);
+    const maxTokens = typeof timeouts === "number"
+      ? (this.options.defaultMaxTokens ?? Number.POSITIVE_INFINITY)
+      : (timeouts.maxTokens ?? this.options.defaultMaxTokens ?? Number.POSITIVE_INFINITY);
     if (!Number.isFinite(inactivityTimeoutMs) || inactivityTimeoutMs <= 0) {
       return Promise.reject(new Error("inactivity timeout must be positive"));
     }
@@ -123,12 +152,15 @@ export class AgyWorker {
     if (maxDurationMs < inactivityTimeoutMs) {
       return Promise.reject(new Error("maximum duration must be greater than or equal to the inactivity timeout"));
     }
+    if (!(maxSteps > 0) || !(maxTokens > 0) || (Number.isFinite(maxSteps) && !Number.isSafeInteger(maxSteps)) || (Number.isFinite(maxTokens) && !Number.isSafeInteger(maxTokens))) {
+      return Promise.reject(new Error("step and token budgets must be positive"));
+    }
     const generation = this.stopGeneration;
     this.queueDepth += 1;
     const job = this.tail.then(() => {
       if (generation !== this.stopGeneration) throw new Error("Antigravity worker was stopped before the queued turn started");
       if (this.unsafeTerminationError) throw this.unsafeRestartError();
-      return this.runTurn(task, inactivityTimeoutMs, maxDurationMs);
+      return this.runTurn(task, inactivityTimeoutMs, maxDurationMs, maxSteps, maxTokens);
     });
     this.tail = job.catch(() => undefined);
     return job.finally(() => { this.queueDepth -= 1; });
@@ -167,7 +199,11 @@ export class AgyWorker {
     return true;
   }
 
-  private runTurn(task: string, inactivityTimeoutMs: number, maxDurationMs: number): Promise<DelegationResult> {
+  interruptActiveTurn(error: Error): void {
+    if (this.pending) void this.invalidate(error, true);
+  }
+
+  private runTurn(task: string, inactivityTimeoutMs: number, maxDurationMs: number, maxSteps: number, maxTokens: number): Promise<DelegationResult> {
     this.ensureStarted();
     if (!this.child) return Promise.reject(new Error("Antigravity worker did not start"));
     return new Promise<DelegationResult>((resolve, reject) => {
@@ -177,7 +213,13 @@ export class AgyWorker {
         progress: [],
         startedAtMs: Date.now(),
         inactivityTimeoutMs,
-        maxDurationMs
+        maxDurationMs,
+        maxSteps,
+        maxTokens,
+        observedStepIds: new Set<string>(),
+        observedTokens: 0,
+        stepTokenUsage: new Map<string, number>(),
+        anonymousSteps: 0
       };
       this.resetInactivityTimer();
       this.pending.maxDurationTimer = setTimeout(() => {
@@ -198,9 +240,11 @@ export class AgyWorker {
     if (this.child) return;
     const args = [
       ...(this.options.prefixArgs ?? []),
-      "--input-format", "stream-json", "--output-format", "stream-json", "--print-timeout", "0", "--mode", this.options.mode
+      "--input-format", "stream-json", "--output-format", "stream-json", "--print-timeout", "0", "--mode", this.options.mode,
+      "--add-dir", this.options.cwd, "--disable-slash-commands"
     ];
     if (this.conversationId) args.push("--conversation", this.conversationId);
+    else args.push("--new-project");
     if (this.options.model) args.push("--model", this.options.model);
     if (this.options.effort) args.push("--effort", this.options.effort);
     if (this.options.agent) args.push("--agent", this.options.agent);
@@ -249,6 +293,32 @@ export class AgyWorker {
     if (event.event === "step_update") {
       const update = event.step_update;
       if (this.pending && update) {
+        const indexedStep = typeof update.step_index === "number" && Number.isSafeInteger(update.step_index);
+        const stepId = indexedStep ? String(update.step_index)
+          : (String(update.state ?? "").toUpperCase() === "DONE" ? `anonymous-${++this.pending.anonymousSteps}` : undefined);
+        if (stepId !== undefined && !this.pending.observedStepIds.has(stepId)) {
+          if (this.pending.observedStepIds.size >= this.pending.maxSteps) {
+            void this.invalidate(new AgyBudgetError("steps", this.pending.maxSteps), true);
+            return;
+          }
+          if (this.pending.observedTokens >= this.pending.maxTokens) {
+            void this.invalidate(new AgyBudgetError("tokens", this.pending.maxTokens), true);
+            return;
+          }
+          this.pending.observedStepIds.add(stepId);
+        }
+        if (
+          String(update.state ?? "").toUpperCase() === "DONE" &&
+          String(update.step_type ?? "").toLowerCase() === "agent_response" &&
+          typeof update.usage?.total_tokens === "number" &&
+          Number.isFinite(update.usage.total_tokens) &&
+          update.usage.total_tokens > 0
+        ) {
+          const usageKey = stepId ?? `usage-${++this.pending.anonymousSteps}`;
+          const previous = this.pending.stepTokenUsage.get(usageKey) ?? 0;
+          this.pending.observedTokens += Math.max(0, update.usage.total_tokens - previous);
+          this.pending.stepTokenUsage.set(usageKey, Math.max(previous, update.usage.total_tokens));
+        }
         const summary = [update.step_type, update.state].filter(Boolean).join(":");
         if (summary) this.pending.progress.push(summary);
         if (this.pending.progress.length > 50) this.pending.progress.shift();

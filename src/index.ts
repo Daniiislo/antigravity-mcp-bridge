@@ -23,7 +23,7 @@ async function main(): Promise<void> {
   process.stdin.once("end", () => { void shutdown(); });
   process.stdin.once("close", () => { void shutdown(); });
   process.once("beforeExit", () => { void manager.stop(); });
-  console.error("[antigravity-mcp-bridge] serving over stdio");
+  console.error(`[antigravity-mcp-bridge] serving over stdio build=${manager.getRuntimeInfo().build_id} wait=terminal`);
 }
 
 main().catch((error: unknown) => {
