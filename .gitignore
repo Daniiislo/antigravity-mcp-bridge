@@ -12,3 +12,9 @@ coverage/
 .antigravity-bridge/
 work/
 *.tgz
+
+# The distributable plugin bundles its production dependencies so installs
+# never run npm; un-ignore that tree (the global node_modules/ rule above
+# still covers the repository root).
+!plugins/antigravity-mcp-bridge/node_modules/
+!plugins/antigravity-mcp-bridge/node_modules/**
