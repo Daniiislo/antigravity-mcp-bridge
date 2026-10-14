@@ -3,6 +3,7 @@ node_modules/
 # upgrade` delivers prebuilt artifacts; installs never run a build step.
 !dist/
 dist/*.tsbuildinfo
+plugins/antigravity-mcp-bridge/dist/
 coverage/
 *.log
 .env

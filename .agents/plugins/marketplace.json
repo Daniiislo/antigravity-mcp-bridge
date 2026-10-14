@@ -8,7 +8,7 @@
       "name": "antigravity-mcp-bridge",
       "source": {
         "source": "local",
-        "path": "."
+        "path": "./plugins/antigravity-mcp-bridge"
       },
       "policy": {
         "installation": "AVAILABLE",

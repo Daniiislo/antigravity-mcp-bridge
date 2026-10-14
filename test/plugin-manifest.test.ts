@@ -91,6 +91,31 @@ describe("Agent Plugins Manifests", () => {
     expect(raw).not.toContain("/Users/");
   });
 
+  it("distributable plugin directory matches the shipping layout of known-good plugins", () => {
+    // Same shape as mem0's integrations/codex-plugin and overpowers' plugins/overpowers:
+    // a dedicated subdirectory holding .codex-plugin/plugin.json + .mcp.json + runtime code,
+    // never mixed into the repository root.
+    const pluginDir = path.join(root, "plugins", "antigravity-mcp-bridge");
+    expect(existsSync(path.join(pluginDir, ".codex-plugin", "plugin.json"))).toBe(true);
+    expect(existsSync(path.join(pluginDir, ".mcp.json"))).toBe(true);
+    expect(existsSync(path.join(pluginDir, "dist", "index.js"))).toBe(true);
+
+    // Root-level plugin.json/mcp.json would shadow the .codex-plugin manifest and
+    // break `codex plugin add` with "missing or invalid plugin.json".
+    expect(existsSync(path.join(pluginDir, "plugin.json"))).toBe(false);
+    expect(existsSync(path.join(pluginDir, "mcp.json"))).toBe(false);
+
+    const pluginManifest = JSON.parse(readFileSync(path.join(pluginDir, ".codex-plugin", "plugin.json"), "utf8"));
+    expect(pluginManifest.name).toBe("antigravity-mcp-bridge");
+    expect(pluginManifest.mcpServers).toBe("./.mcp.json");
+
+    const mcp = JSON.parse(readFileSync(path.join(pluginDir, ".mcp.json"), "utf8"));
+    const server = mcp.mcpServers["antigravity-bridge"];
+    expect(server.command).toBe("node");
+    expect(server.args[0]).toMatch(/^\.?\/?dist\/index\.js$/);
+    expect(existsSync(path.resolve(pluginDir, server.args[0]))).toBe(true);
+  });
+
   it("marketplace.json is portable: relative plugin path, installable from any clone", () => {
     const marketplaceJsonPath = path.join(root, ".agents", "plugins", "marketplace.json");
     expect(existsSync(marketplaceJsonPath)).toBe(true);
@@ -104,10 +129,9 @@ describe("Agent Plugins Manifests", () => {
     const entry = marketplace.plugins?.find((p: { name: string }) => p.name === "antigravity-mcp-bridge");
     expect(entry).toBeDefined();
 
-    // The plugin source must be relative so any clone location works
-    expect(entry.source.path).toBe(".");
-    expect(() => JSON.stringify(entry.source.path)).not.toThrow();
-    expect(existsSync(path.resolve(root, entry.source.path, "plugin.json"))).toBe(true);
+    // The plugin source must be a relative subdirectory so any clone location works
+    expect(entry.source.path).toBe("./plugins/antigravity-mcp-bridge");
+    expect(existsSync(path.resolve(root, entry.source.path, ".codex-plugin", "plugin.json"))).toBe(true);
 
     // No machine-specific absolute paths anywhere in the catalog
     expect(raw).not.toMatch(/(?:^|[\s"'`=])([a-zA-Z]:[\\/])/);
