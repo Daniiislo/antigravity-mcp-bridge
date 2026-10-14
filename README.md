@@ -1,108 +1,73 @@
 # Antigravity MCP Bridge
 
-A local Model Context Protocol (MCP) server that lets Codex or Claude Code coordinate persistent Antigravity CLI (`agy`) workers as independent implementers and testers.
+A Model Context Protocol (MCP) server that lets Codex or Claude Code coordinate persistent [Antigravity](https://antigravity.google) CLI (`agy`) workers as independent implementers and testers.
+
+Install it from the Git marketplace like any published plugin — no clone, no build, no `npm install`. The plugin ships prebuilt artifacts and bundled dependencies.
 
 The bridge uses stdio, starts child processes without a shell, restricts workers to explicit workspace roots, and records bounded NDJSON audit events locally.
 
 ## Requirements
 
-- Node.js 20 or newer
-- Codex CLI/Desktop or Claude Code
-- Antigravity CLI (`agy`), authenticated for the current user
-- Git
+- [Codex](https://developers.openai.com/codex/) CLI/Desktop or [Claude Code](https://claude.com/claude-code)
+- [Antigravity CLI](https://antigravity.google) (`agy`), authenticated for the current user
+- Node.js 20 or newer on `PATH`
 
-Verify the required commands:
+Verify `agy`:
 
 ```bash
-node --version
 agy --version
 ```
 
-## Install
+## Install (Codex)
+
+Add the marketplace once, then install the plugin:
 
 ```bash
-git clone https://github.com/Daniiislo/antigravity-mcp-bridge.git
-cd antigravity-mcp-bridge
-npm ci
-npm run build
+codex plugin marketplace add Daniiislo/antigravity-mcp-bridge --ref main
+codex plugin add antigravity-mcp-bridge
 ```
 
-## Register
-
-You can register the bridge in either of two ways:
-
-1. **Method 1: Local Agent Plugin (Recommended for Codex & ChatGPT Desktop):** Registers as an Agent Plugin with full metadata (`plugin.json` / `mcp.json`), making it visible and manageable in the Plugins interface.
-2. **Method 2: Direct MCP Server (Codex CLI or Claude Code):** Adds the stdio server directly to your host's MCP configuration (`config.toml` or `claude.json`).
-
----
-
-### Method 1: Local Agent Plugin (Codex / ChatGPT Desktop)
-
-Register the bridge into your local plugin marketplace:
-
-```powershell
-npm run register:plugin
-```
-
-To target your personal user marketplace catalog:
-
-```powershell
-# Windows PowerShell:
-npm run register:plugin -- --catalog "$env:USERPROFILE\.agents\plugins\marketplace.json"
-
-# macOS / Linux:
-npm run register:plugin -- --catalog "$HOME/.agents/plugins/marketplace.json"
-```
-
-Alternatively, add the repository directory directly via Codex CLI:
-
-```bash
-codex plugin marketplace add "."
-```
-
-Verify that the plugin is recognized:
+Verify:
 
 ```bash
 codex plugin list
 ```
 
----
+The bridge registers an MCP server named `antigravity-bridge` with 18 tools. Restart Codex after installing.
 
-### Method 2: Direct MCP Server Registration
+**Which directory can workers touch?** By default the bridge allows the directory it starts in. To let workers edit any project under a folder (or a whole drive), set `AGY_ALLOWED_ROOTS` in the plugin MCP config (see [Configuration](#configuration)) — for example `C:\Projects` or `$HOME/Projects`; repeat roots with the OS path separator (`;` on Windows, `:` elsewhere).
 
-Specify the workspace directories that Antigravity workers are allowed to access via `--root`:
+## Install (Claude Code / any MCP host)
 
-Codex:
-
-```powershell
-npm run register:codex -- --root "C:\Projects" --root "D:\Work"
-codex mcp get antigravity-bridge
-```
-
-Claude Code:
-
-```powershell
-npm run register:claude -- --root "C:\Projects" --root "D:\Work"
-claude mcp get antigravity-bridge
-```
-
-The same commands work on macOS and Linux with POSIX paths:
+Any MCP host can run the server directly:
 
 ```bash
-npm run register:codex -- --root "$HOME/Projects"
-# or
-npm run register:claude -- --root "$HOME/Projects"
+claude mcp add antigravity-bridge -- node "<path>/dist/index.js"
 ```
 
-To allow complete Windows drives instead:
+Point `AGY_ALLOWED_ROOTS` at your project directories (see [Configuration](#configuration)). The prebuilt server lives in the plugin directory; fetch it with `git clone https://github.com/Daniiislo/antigravity-mcp-bridge.git` and use `dist/index.js` from the clone — no build step needed.
 
-```powershell
-npm run register:codex -- --root "C:\" --root "D:\"
+## Update
+
+```bash
+codex plugin marketplace upgrade
 ```
 
-Open a new Codex task or restart Claude Code after registration.
+Then remove and re-add the plugin to pick up the new version:
 
-`--root` may be repeated. Use a project folder for tighter access or a drive root for every directory on that drive. Both installers automatically discover their host CLI, `agy`, and Node.js. Claude Code registration uses the global `user` scope.
+```bash
+codex plugin remove antigravity-mcp-bridge
+codex plugin add antigravity-mcp-bridge
+```
+
+## Uninstall
+
+```bash
+codex plugin remove antigravity-mcp-bridge
+codex plugin marketplace remove antigravity-bridge
+```
+
+This removes the plugin and marketplace registration. Run logs (under the OS state directory, see [Configuration](#configuration)) stay on disk.
 
 ## Controller API
 
@@ -140,17 +105,7 @@ To prevent excessive prompt token consumption in coordinating agents (such as Co
 - **Prefer negotiated MCP Tasks:** The bridge advertises the official `io.modelcontextprotocol/tasks` extension. A compatible host receives a durable task handle from `dispatch_task`, observes it outside the model turn, and gets the compact final result from `tasks/get`. This removes model-driven `wait_task` and `inspect_task` calls.
 - **Capability-safe fallback:** The bridge never returns a Task to a caller that did not declare Tasks support. Existing hosts retain the immediate enqueue response and make one terminal `wait_task` call; there is no fixed heartbeat loop.
 - **Wait once:** Call `wait_task({ job_id })` exactly once. Its terminal response already contains the bounded inspection result. Do not poll events, status, dashboard, or `inspect_task` unless the terminal result fails and diagnostics are needed.
-- **Set the host timeout above the worker cap:** The default absolute worker cap is 600 seconds, so a 660-second MCP tool timeout leaves cleanup margin without waking the model periodically:
-
-  ```toml
-  [mcp_servers.antigravity-bridge]
-  tool_timeout_sec = 660
-
-  [features.code_mode]
-  direct_only_tool_namespaces = ["mcp__antigravity_bridge"]
-  ```
-
-  Restart Codex after changing configuration. A host timeout or user interruption detaches only the waiter; it does not cancel the worker. Reuse the same job ID and never dispatch a duplicate.
+- **Set the host timeout above the worker cap:** The default absolute worker cap is 1800 seconds, so a 1900-second MCP tool timeout leaves cleanup margin without waking the model periodically. Near the deadline the bridge asks the worker to wrap up (FINISH_NOW); a result returned in that grace window is a normal handoff, not a failure.
 - **Restart safety:** A persisted `queued` or `running` record cannot prove its child process survived a bridge restart. `wait_task` reports `ORPHANED_JOB` instead of pretending that record is terminal or dispatching duplicate work.
 - **Load diagnostics only when needed:** On failure, use `include_prompt: true` and/or `include_steps: true`; keep them false for successful tasks. Inspection reports `caller_payload_chars` (serialized structured payload before that field is added), a 32,768-character budget, and whether result/error truncation occurred. These are character measurements, not model-token estimates.
 - **Open the dashboard explicitly:** Frequent lifecycle tools omit dashboard URLs; call `open_dashboard` only when a human actually needs live diagnostics.
@@ -208,7 +163,7 @@ npm run clean -- --all -y
 
 ## Configuration
 
-The registration installer writes environment variables into the host MCP configuration. The server does not automatically load `.env` files. See [`.env.example`](.env.example) in the source repository for a reference template.
+All configuration is environment variables — set them in your host's MCP server entry (`AGY_ALLOWED_ROOTS` is the one most installs need). The server does not automatically load `.env` files. See [`.env.example`](.env.example) for a full reference template.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -216,7 +171,7 @@ The registration installer writes environment variables into the host MCP config
 | `AGY_BIN` | Auto-discovered | Exact `agy` executable or command name. |
 | `AGY_RUNS_DIR` | Per-user shared state directory | Override the NDJSON event directory. The default is `%LOCALAPPDATA%\antigravity-mcp-bridge\runs` on Windows, `~/Library/Application Support/antigravity-mcp-bridge/runs` on macOS, and `${XDG_STATE_HOME:-~/.local/state}/antigravity-mcp-bridge/runs` on Linux. |
 | `AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS` | `300` | Stop a worker after this many seconds without an `init` or `step_update` progress event. Set `inactivity_timeout_seconds` per job to override it. |
-| `AGY_MAX_TURN_SECONDS` | `600` | Absolute wall-clock safety cap even while progress continues. Set `max_duration_seconds` per job to override it. |
+| `AGY_MAX_TURN_SECONDS` | `1800` | Absolute wall-clock safety cap even while progress continues. Near the deadline the bridge asks the worker to wrap up (FINISH_NOW) so partial work hands off as a normal result. Set `max_duration_seconds` per job to override it. |
 | `AGY_MAX_STEPS` | Unset | Optional observed step ceiling. Repeated indexed updates count once; unindexed DONE updates count conservatively. Calibrate on useful-result benchmarks. |
 | `AGY_MAX_TURN_TOKENS` | Unset | Optional observed streamed model-token ceiling, excluding cache-read. Duplicate indexed DONE usage is not charged twice. Upstream generation may overshoot before an event arrives. |
 | `AGY_DEFAULT_TIMEOUT_SECONDS` | Unset | Backward-compatible alias for the inactivity timeout, used only when `AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS` is unset. |
@@ -245,7 +200,7 @@ History written by older versions under a workspace-local `.antigravity-bridge/r
 
 ### Deadline, retry, and preflight contracts
 
-`dispatch_task` and `send_followup` accept `total_duration_seconds`, measured from dispatch including queue time. It defaults to the effective maximum duration (600 seconds with default configuration). Queued expiry does not start AGY; active expiry waits for confirmed process-tree cleanup before queue advancement. Set the host timeout above this total budget plus cleanup margin. The compatibility `agy_delegate` remains a direct turn and has no manager queue deadline.
+`dispatch_task` and `send_followup` accept `total_duration_seconds`, measured from dispatch including queue time. It defaults to the effective maximum duration (1800 seconds with default configuration). Queued expiry does not start AGY; active expiry waits for confirmed process-tree cleanup before queue advancement. Set the host timeout above this total budget plus cleanup margin. The compatibility `agy_delegate` remains a direct turn and has no manager queue deadline.
 
 Use optional `request_key` for uncertain retries with exactly the same worker, brief and explicit options. Identical retries return the original job, including after restart for completed jobs; conflicting reuse fails. A persisted nonterminal retry returns `ORPHANED_JOB` instead of starting duplicate work. Keys are scoped to a bridge history store; this is not a distributed cross-process locking guarantee. Recover the original job after waiter interruption rather than inventing a new key.
 
@@ -259,52 +214,26 @@ For offline diagnosis, run `node scripts/analyze-runs.mjs [runs-directory]` afte
 - Local read-only dashboard binds strictly to `127.0.0.1`, enforces per-process bearer tokens, validates `Host` headers against DNS rebinding, serves strict CSP headers, and employs safe DOM text APIs with zero external assets.
 - Runtime logs, scratch files, dependencies, build output, and secrets are excluded from Git.
 
-## Update
-
-```bash
-git pull
-npm ci
-npm test
-npm run build
-codex mcp remove antigravity-bridge
-npm run register:codex -- --root "/path/to/projects"
-```
-
-For Claude Code, replace the two commands above with `claude mcp remove antigravity-bridge --scope user` and `npm run register:claude -- ...`.
-
-Registration is replaced as a whole. Include every allowed root when registering again.
-
-## Remove
-
-```bash
-codex mcp remove antigravity-bridge
-```
-
-Claude Code:
-
-```bash
-claude mcp remove antigravity-bridge --scope user
-```
-
-This removes the MCP registration but does not delete the repository or local run logs.
-
 ## Troubleshooting
 
-- **`agy` not found:** install and authenticate `agy`, add it to `PATH`, or pass `--agy-bin`.
-- **Workspace rejected:** register its canonical parent directory with `--root`.
-- **Tools missing:** verify registration, then start a new Codex task or restart Claude Code.
-- **Registration exists:** remove the existing entry before registering again.
+- **`agy` not found:** install and authenticate the Antigravity CLI, add it to `PATH`, or set `AGY_BIN` to its exact location.
+- **Workspace rejected:** add the project's canonical parent directory to `AGY_ALLOWED_ROOTS`.
+- **Tools missing:** verify the plugin with `codex plugin list`, then restart Codex.
 - **Action denied:** grant only the narrow Antigravity permission required by the task.
+- **Stale job after a crash:** jobs stuck queued/running across a bridge restart are reported as `orphaned`; inspect them with `inspect_task` before replacing the work.
 
 ## Development
 
 ```bash
-npm test
+git clone https://github.com/Daniiislo/antigravity-mcp-bridge.git
+cd antigravity-mcp-bridge
+npm ci
+npm test          # builds, then runs the full suite
 npm run typecheck
 npm run smoke
-npm audit --audit-level=high
-npm pack --dry-run
 ```
+
+`npm run build` also syncs the compiled output and the production dependency closure into `plugins/antigravity-mcp-bridge/`, which is the directory shipped through the marketplace — commit it when changing runtime code.
 
 CI runs these checks on Windows and Ubuntu with Node.js 20 and 22.
 
