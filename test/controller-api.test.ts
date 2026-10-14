@@ -1122,4 +1122,53 @@ describe("Controller API (Tasks 5-7)", () => {
       }
     });
   });
+
+  describe("server-taught usage protocol", () => {
+    it("serves the usage protocol through initialize instructions", async () => {
+      const { mgr } = makeManager({ defaultTimeoutMs: 123_000, maxTurnTimeoutMs: 456_000 });
+      const server = createServer(mgr);
+      const [t1, t2] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "protocol-test-client", version: "1.0.0" });
+
+      await server.connect(t1);
+      await client.connect(t2);
+
+      try {
+        const instructions = client.getInstructions();
+        expect(instructions).toBeTruthy();
+        // Live limits come from the running build, not external docs.
+        expect(instructions).toContain("123");
+        expect(instructions).toContain("456");
+        // Core failure-handling rules are taught by the server itself.
+        expect(instructions).toContain("max_duration");
+        expect(instructions).toContain("ORPHANED_JOB");
+        expect(instructions).toContain("list_models");
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    });
+
+    it("exposes the same protocol through runtime_info for agents that need it later", async () => {
+      const { mgr } = makeManager({ defaultTimeoutMs: 123_000, maxTurnTimeoutMs: 456_000 });
+      const server = createServer(mgr);
+      const [t1, t2] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "runtime-info-client", version: "1.0.0" });
+
+      await server.connect(t1);
+      await client.connect(t2);
+
+      try {
+        const res = await client.callTool({ name: "runtime_info", arguments: {} });
+        const structured = res.structuredContent as Record<string, unknown>;
+        expect(structured.instructions).toBeTruthy();
+        expect(String(structured.instructions)).toContain("456");
+        expect(structured.inactivity_seconds).toBe(123);
+        expect(structured.maximum_turn_seconds).toBe(456);
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    });
+  });
 });

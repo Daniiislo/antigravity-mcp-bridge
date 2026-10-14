@@ -5,7 +5,7 @@ import { WorkerManager } from "./worker-manager.js";
 
 const roleSchema = z.enum(["implementer", "tester"]);
 const optionalRoleSchema = roleSchema.optional().describe("Omit to target both roles");
-const jobStatusSchema = z.enum(["queued", "running", "succeeded", "failed", "canceled"]);
+const jobStatusSchema = z.enum(["queued", "running", "succeeded", "failed", "canceled", "orphaned"]);
 
 function success(data: unknown, summary: string) {
   const structuredContent = JSON.parse(JSON.stringify(data)) as Record<string, unknown>;
@@ -27,9 +27,9 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
   // --- Controller Tools ---
 
   server.registerTool("runtime_info", {
-    description: "Read build identity and safe execution limits once after installation/restart. Diagnostic only; do not poll.",
+    description: "Read build identity, live execution limits, and this server's usage protocol once at session start or after any restart. Values come from the running build, not external docs. Diagnostic only; do not poll.",
     inputSchema: z.object({})
-  }, () => success(manager.getRuntimeInfo(), "Bridge runtime identity and limits."));
+  }, () => success({ ...manager.getRuntimeInfo(), instructions: manager.serverInstructions() }, "Bridge runtime identity, limits, and usage protocol."));
 
   server.registerTool("list_models", {
     title: "List Antigravity Models",
@@ -68,16 +68,16 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
 
   server.registerTool("dispatch_task", {
     title: "Dispatch Task",
-    description: "Enqueue a bounded task. Use a tester worker for review/verification and an implementer worker only for edits. Returns an MCP Task when negotiated, otherwise a job ID immediately.",
+    description: "Enqueue a bounded task on a worker. One coherent workstream per dispatch — size the brief to finish within the total deadline (default from runtime_info), counting first-read exploration on a fresh conversation; split multi-part batches into separate dispatches on the same worker. Pin model/effort only with IDs list_models printed. Use a tester worker for review/verification and an implementer worker only for edits. Returns an MCP Task when negotiated, otherwise a job ID immediately.",
     inputSchema: z.object({
       worker_id: z.string().min(1).describe("Target worker ID"),
       brief: z.string().min(1).describe("Task brief to enqueue"),
       request_key: z.string().min(1).max(128).optional().describe("Stable retry key; reuse with exactly the same task/options to avoid duplicate work"),
-      total_duration_seconds: z.number().positive().max(86_400).optional().describe("Deadline from dispatch including queue time; defaults to the effective maximum duration"),
+      total_duration_seconds: z.number().positive().max(86_400).optional().describe("Deadline from dispatch including queue time; defaults to the effective maximum duration. Near the deadline the worker is asked to wrap up and hand off"),
       timeout_seconds: z.number().positive().max(86_400).optional()
         .describe("Deprecated alias for inactivity_timeout_seconds"),
       inactivity_timeout_seconds: z.number().positive().max(86_400).optional()
-        .describe("Time without a meaningful progress event before termination"),
+        .describe("Time without a meaningful progress event before termination; raise it for workers generating one large quiet output"),
       max_duration_seconds: z.number().positive().max(86_400).optional()
         .describe("Absolute wall-clock safety cap even while progress continues")
     })
@@ -101,7 +101,7 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
 
   server.registerTool("wait_task", {
     title: "Wait on Task",
-    description: "Wait in one pending call until the task reaches a terminal state, then return its compact result. Do not poll or call inspect_task afterward. The host MCP tool timeout must exceed the intended task duration.",
+    description: "Wait in one pending call until the task reaches a terminal state, then return its compact result — the only normal completion evidence. Do not poll status/events and do not call inspect_task afterward on success. Host MCP tool timeout must exceed the job's total deadline.",
     inputSchema: z.object({
       job_id: z.string().min(1).describe("Job ID to wait for")
     })
