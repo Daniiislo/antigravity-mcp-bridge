@@ -15,6 +15,7 @@ export function runtimeInfo(config: BridgeConfig) {
     maximum_turn_seconds: (config.maxTurnTimeoutMs ?? 1_800_000) / 1_000,
     steps_budget: config.maxSteps ?? null,
     observed_token_budget: config.maxTurnTokens ?? null,
+    allowed_roots: config.allowedRoots,
     tasks_capability_gated: true
   };
 }

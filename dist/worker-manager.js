@@ -1,4 +1,5 @@
 import { createHash, randomInt } from "node:crypto";
+import path from "node:path";
 import { normalizeDeniedAction } from "./agy-protocol.js";
 import { AgyBudgetError, AgyTimeoutError, AgyWorker } from "./agy-worker.js";
 import { resolveAllowedWorkspace, resolveCandidateRunsDirs, resolveDefaultRunsDir } from "./config.js";
@@ -76,6 +77,7 @@ export class WorkerManager {
             "6. inspect_task / agy_events only for failure diagnostics; not after a successful wait.",
             "",
             `LIMITS (live from this build; do not assume other values)`,
+            `- Allowed workspace roots: ${info.allowed_roots.join(path.delimiter)}. Workers may only run inside these; a rejected workspace names the fix.`,
             `- Inactivity timeout: ${info.inactivity_seconds}s without a meaningful progress event terminates the turn.`,
             `- Total deadline: ${info.maximum_turn_seconds}s default per job (dispatch total_duration_seconds may lower it). ${info.maximum_turn_seconds <= 600 ? "Keep briefs to 1-2 focused file edits." : "Near the deadline the bridge asks the worker to wrap up (FINISH_NOW); a result returned in that grace window is a normal handoff."}`,
             ...(info.steps_budget !== null ? [`- Step budget: ${info.steps_budget} steps per turn.`] : []),

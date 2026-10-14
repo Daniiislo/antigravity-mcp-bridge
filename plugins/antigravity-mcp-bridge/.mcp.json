@@ -8,7 +8,6 @@
       ],
       "cwd": ".",
       "env": {
-        "AGY_ALLOWED_ROOTS": ".",
         "AGY_BIN": "agy",
         "AGY_MAX_TURN_SECONDS": "1800"
       }

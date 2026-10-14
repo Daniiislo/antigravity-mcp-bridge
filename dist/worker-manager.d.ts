@@ -168,6 +168,7 @@ export declare class WorkerManager {
         maximum_turn_seconds: number;
         steps_budget: number | null;
         observed_token_budget: number | null;
+        allowed_roots: string[];
         tasks_capability_gated: boolean;
     };
     /**

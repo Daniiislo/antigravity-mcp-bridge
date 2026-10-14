@@ -22,8 +22,25 @@ export interface BridgeConfig {
 }
 export declare function resolveDefaultRunsDir(env?: NodeJS.ProcessEnv, platform?: NodeJS.Platform, homeDirectory?: string): string;
 export declare function resolveCandidateRunsDirs(configuredRunsDir?: string, env?: NodeJS.ProcessEnv, platform?: NodeJS.Platform, homeDirectory?: string): string[];
+/**
+ * Per-user configuration file, so marketplace installs (whose working
+ * directory is a versioned plugin cache) can still name the real workspace
+ * roots Antigravity workers may touch. Env variables keep precedence.
+ */
+export declare function resolveUserConfigPath(env?: NodeJS.ProcessEnv, homeDirectory?: string): string;
+export interface UserConfigFile {
+    allowed_roots?: string[];
+}
+/**
+ * Read `allowed_roots` from the per-user config file. Returns undefined when
+ * the file is absent; malformed JSON or a non-array value is a hard error so
+ * a typo cannot silently widen or narrow the workspace boundary.
+ */
+export declare function readUserAllowedRoots(env?: NodeJS.ProcessEnv, homeDirectory?: string, reader?: (file: string) => string): string[] | undefined;
 export declare function resolveAllowedWorkspace(cwd: string, roots: string[]): string;
 export declare function loadConfig(env?: NodeJS.ProcessEnv, startDirectory?: string, options?: {
     resolveExecutable?: boolean;
     fileExists?: (p: string) => boolean;
+    homeDirectory?: string;
+    configReader?: (file: string) => string;
 }): BridgeConfig;

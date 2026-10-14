@@ -75,7 +75,7 @@ describe("Controller API (Tasks 5-7)", () => {
       await expect(mgr.createWorker({
         role: "tester",
         workspace: outside
-      })).rejects.toThrow(/outside allowed roots/i);
+      })).rejects.toThrow(/Workspace rejected/i);
     });
   });
 

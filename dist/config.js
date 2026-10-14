@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { resolveAgyExecutable } from "./resolve-executable.js";
@@ -110,6 +110,43 @@ function optionalEffort(raw) {
         return raw;
     throw new Error("AGY_EFFORT must be low, medium, high, xhigh, or max");
 }
+/**
+ * Per-user configuration file, so marketplace installs (whose working
+ * directory is a versioned plugin cache) can still name the real workspace
+ * roots Antigravity workers may touch. Env variables keep precedence.
+ */
+export function resolveUserConfigPath(env = process.env, homeDirectory = homedir()) {
+    if (env.AGY_USER_CONFIG)
+        return path.resolve(env.AGY_USER_CONFIG);
+    return path.join(homeDirectory, ".antigravity-bridge", "config.json");
+}
+/**
+ * Read `allowed_roots` from the per-user config file. Returns undefined when
+ * the file is absent; malformed JSON or a non-array value is a hard error so
+ * a typo cannot silently widen or narrow the workspace boundary.
+ */
+export function readUserAllowedRoots(env = process.env, homeDirectory = homedir(), reader = (file) => readFileSync(file, "utf8")) {
+    const file = resolveUserConfigPath(env, homeDirectory);
+    if (!existsSync(file))
+        return undefined;
+    let parsed;
+    try {
+        parsed = JSON.parse(reader(file));
+    }
+    catch (error) {
+        throw new Error(`${file} is not valid JSON: ${error.message}`);
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error(`${file} must contain a JSON object`);
+    }
+    const config = parsed;
+    if (config.allowed_roots === undefined)
+        return undefined;
+    if (!Array.isArray(config.allowed_roots) || !config.allowed_roots.every((root) => typeof root === "string" && root.trim() !== "")) {
+        throw new Error(`${file}: allowed_roots must be an array of directory paths`);
+    }
+    return config.allowed_roots;
+}
 function canonicalDirectory(input, label) {
     try {
         const canonical = realpathSync.native(path.resolve(input));
@@ -128,11 +165,20 @@ export function resolveAllowedWorkspace(cwd, roots) {
         const relative = path.relative(root, workspace);
         return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
     });
-    if (!matches)
-        throw new Error(`cwd is outside allowed roots: ${workspace}`);
+    if (!matches) {
+        const hint = [
+            `Workspace rejected: ${workspace}`,
+            `Allowed roots: ${allowed.join(path.delimiter)}`,
+            "To allow it, add the directory to allowed_roots in ~/.antigravity-bridge/config.json (create the file if missing):",
+            '  { "allowed_roots": ["<your-project-directory>"] }',
+            "or set the AGY_ALLOWED_ROOTS environment variable in your MCP server config, then restart the host."
+        ].join("\n");
+        throw new Error(hint);
+    }
     return workspace;
 }
 export function loadConfig(env = process.env, startDirectory = process.cwd(), options) {
+    const homeDirectory = options?.homeDirectory ?? homedir();
     const sandbox = booleanValue(env, "AGY_SANDBOX", false);
     const dangerouslySkipPermissions = booleanValue(env, "AGY_DANGEROUSLY_SKIP_PERMISSIONS", false);
     const defaultTimeoutMs = (env.AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS !== undefined
@@ -147,8 +193,15 @@ export function loadConfig(env = process.env, startDirectory = process.cwd(), op
     const maxTurnTokens = env.AGY_MAX_TURN_TOKENS ? positiveInteger(env, "AGY_MAX_TURN_TOKENS", 60_000) : undefined;
     const dashboardEnabled = booleanValue(env, "AGY_DASHBOARD_ENABLED", true);
     const dashboardPort = portNumber(env, "AGY_DASHBOARD_PORT", 0);
-    const configuredRoots = env.AGY_ALLOWED_ROOTS?.split(path.delimiter).filter(Boolean) ?? [startDirectory];
-    const allowedRoots = configuredRoots.map((root) => canonicalDirectory(root, "AGY_ALLOWED_ROOTS entry"));
+    // Precedence: AGY_ALLOWED_ROOTS env > per-user config file > user home.
+    // A marketplace install's start directory is a versioned plugin cache, so
+    // it is never a useful default; the user home keeps workers inside the
+    // user's own tree while remaining a single, predictable fallback.
+    const fileRoots = readUserAllowedRoots(env, homeDirectory, options?.configReader);
+    const configuredRoots = env.AGY_ALLOWED_ROOTS?.split(path.delimiter).filter(Boolean)
+        ?? fileRoots
+        ?? [homeDirectory];
+    const allowedRoots = configuredRoots.map((root) => canonicalDirectory(root, root === homeDirectory ? "user home (default allowed root)" : "AGY_ALLOWED_ROOTS entry"));
     const model = env.AGY_MODEL || undefined;
     const effort = optionalEffort(env.AGY_EFFORT);
     const agent = env.AGY_AGENT || undefined;

@@ -1,8 +1,8 @@
-import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig, resolveAllowedWorkspace, resolveCandidateRunsDirs, resolveDefaultRunsDir } from "../src/config.js";
+import { loadConfig, readUserAllowedRoots, resolveAllowedWorkspace, resolveCandidateRunsDirs, resolveDefaultRunsDir, resolveUserConfigPath } from "../src/config.js";
 
 const created: string[] = [];
 afterEach(() => {
@@ -20,11 +20,95 @@ describe("workspace boundary", () => {
     mkdirSync(sibling);
 
     expect(resolveAllowedWorkspace(child, [root])).toBe(realpathSync.native(child));
-    expect(() => resolveAllowedWorkspace(sibling, [root])).toThrow(/outside allowed roots/i);
+    expect(() => resolveAllowedWorkspace(sibling, [root])).toThrow(/Workspace rejected/i);
   });
 
   it("rejects a path that is not an existing directory", () => {
     expect(() => resolveAllowedWorkspace(path.join(tmpdir(), "missing-agy-dir"), [tmpdir()])).toThrow(/existing directory/i);
+  });
+
+  it("explains the fix when a workspace is outside the allowed roots", () => {
+    const base = mkdtempSync(path.join(tmpdir(), "agy-hint-"));
+    created.push(base);
+    const allowed = path.join(base, "allowed");
+    const rejected = path.join(base, "rejected");
+    mkdirSync(allowed);
+    mkdirSync(rejected);
+
+    expect(() => resolveAllowedWorkspace(rejected, [allowed]))
+      .toThrow(/config\.json[\s\S]*allowed_roots[\s\S]*AGY_ALLOWED_ROOTS/);
+  });
+});
+
+describe("per-user config file", () => {
+  it("resolves the config path under the user home unless overridden", () => {
+    expect(resolveUserConfigPath({}, "C:\\Users\\Ada"))
+      .toBe("C:\\Users\\Ada\\.antigravity-bridge\\config.json");
+    expect(resolveUserConfigPath({ AGY_USER_CONFIG: "D:\\cfg\\bridge.json" }, "C:\\Users\\Ada"))
+      .toBe("D:\\cfg\\bridge.json");
+  });
+
+  it("reads allowed_roots from the config file", () => {
+    const home = mkdtempSync(path.join(tmpdir(), "agy-home-read-"));
+    created.push(home);
+    const configDir = path.join(home, ".antigravity-bridge");
+    mkdirSync(configDir);
+    writeFileSync(
+      path.join(configDir, "config.json"),
+      JSON.stringify({ allowed_roots: [path.join(home, "projects")] })
+    );
+    mkdirSync(path.join(home, "projects"));
+
+    expect(readUserAllowedRoots({}, home)).toEqual([path.join(home, "projects")]);
+  });
+
+  it("returns undefined when the file is absent or omits allowed_roots", () => {
+    const home = mkdtempSync(path.join(tmpdir(), "agy-home-absent-"));
+    created.push(home);
+
+    expect(readUserAllowedRoots({}, home)).toBeUndefined();
+
+    const configDir = path.join(home, ".antigravity-bridge");
+    mkdirSync(configDir);
+    writeFileSync(path.join(configDir, "config.json"), JSON.stringify({}));
+
+    expect(readUserAllowedRoots({}, home)).toBeUndefined();
+  });
+
+  it("rejects malformed config files instead of guessing the boundary", () => {
+    const home = mkdtempSync(path.join(tmpdir(), "agy-home-bad-"));
+    created.push(home);
+    const configDir = path.join(home, ".antigravity-bridge");
+    mkdirSync(configDir);
+
+    writeFileSync(path.join(configDir, "config.json"), "{ not json");
+    expect(() => readUserAllowedRoots({}, home)).toThrow(/not valid JSON/);
+
+    writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ allowed_roots: "C:\\Projects" }));
+    expect(() => readUserAllowedRoots({}, home)).toThrow(/allowed_roots must be an array/);
+  });
+
+  it("precedence: env beats config file, config file beats user home default", () => {
+    const home = mkdtempSync(path.join(tmpdir(), "agy-home-prec-"));
+    created.push(home);
+    const envRoot = path.join(home, "env-root");
+    const fileRoot = path.join(home, "file-root");
+    mkdirSync(envRoot);
+    mkdirSync(fileRoot);
+
+    const configDir = path.join(home, ".antigravity-bridge");
+    mkdirSync(configDir);
+    writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ allowed_roots: [fileRoot] }));
+
+    const fromFile = loadConfig({}, process.cwd(), { resolveExecutable: false, homeDirectory: home });
+    expect(fromFile.allowedRoots).toEqual([realpathSync.native(fileRoot)]);
+
+    const fromEnv = loadConfig({ AGY_ALLOWED_ROOTS: envRoot }, process.cwd(), { resolveExecutable: false, homeDirectory: home });
+    expect(fromEnv.allowedRoots).toEqual([realpathSync.native(envRoot)]);
+
+    rmSync(configDir, { recursive: true, force: true });
+    const fromDefault = loadConfig({}, process.cwd(), { resolveExecutable: false, homeDirectory: home });
+    expect(fromDefault.allowedRoots).toEqual([realpathSync.native(home)]);
   });
 });
 
@@ -96,6 +180,16 @@ describe("configuration", () => {
       AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS: "30",
       AGY_MAX_TURN_SECONDS: "10"
     }, process.cwd())).toThrow(/AGY_MAX_TURN_SECONDS.*inactivity/i);
+  });
+
+  it("does not read the real user's config file in tests", () => {
+    // Isolated home so a developer's ~/.antigravity-bridge/config.json can
+    // never change what these tests observe. The fake home becomes the
+    // allowed-roots fallback, proving no other roots leaked from this machine.
+    const fakeHome = mkdtempSync(path.join(tmpdir(), "agy-isolated-home-"));
+    created.push(fakeHome);
+    const cfg = loadConfig({}, process.cwd(), { resolveExecutable: false, homeDirectory: fakeHome });
+    expect(cfg.allowedRoots).toEqual([realpathSync.native(fakeHome)]);
   });
 
   it("supports an inactivity timeout plus a separate absolute cap while honoring the legacy alias", () => {

@@ -48,6 +48,6 @@ describe("WorkerManager", () => {
 
   it("rejects a workspace outside the configured roots", async () => {
     const subject = manager();
-    await expect(subject.delegate("implementer", "no", path.dirname(process.cwd()))).rejects.toThrow(/outside allowed roots/i);
+    await expect(subject.delegate("implementer", "no", path.dirname(process.cwd()))).rejects.toThrow(/Workspace rejected/i);
   });
 });

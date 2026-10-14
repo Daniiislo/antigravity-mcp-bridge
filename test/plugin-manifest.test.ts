@@ -134,6 +134,10 @@ describe("Agent Plugins Manifests", () => {
     expect(server.command).toBe("node");
     expect(server.args[0]).toMatch(/^\.?\/?dist\/index\.js$/);
     expect(existsSync(path.resolve(pluginDir, server.args[0]))).toBe(true);
+    // The plugin must NOT pin AGY_ALLOWED_ROOTS to its own cache directory:
+    // marketplace installs resolve workspace roots from the per-user config
+    // file (~/.antigravity-bridge/config.json) or the env variable instead.
+    expect(server.env?.AGY_ALLOWED_ROOTS).toBeUndefined();
   });
 
   it("marketplace.json is portable: relative plugin path, installable from any clone", () => {
