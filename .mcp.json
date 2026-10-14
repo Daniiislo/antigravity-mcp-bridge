@@ -7,8 +7,10 @@
       ],
       "env": {
         "AGY_ALLOWED_ROOTS": ".",
-        "AGY_BIN": "agy"
-      }
+        "AGY_BIN": "agy",
+        "AGY_MAX_TURN_SECONDS": "1800"
+      },
+      "tool_timeout_sec": 1900
     }
   }
 }

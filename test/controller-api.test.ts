@@ -80,6 +80,30 @@ describe("Controller API (Tasks 5-7)", () => {
   });
 
   describe("dispatch_task and wait_task", () => {
+    it("warns on dispatch when the brief bundles multiple workstreams", async () => {
+      const { mgr } = makeManager();
+      const worker = await mgr.createWorker({ role: "tester", workspace: process.cwd() });
+      const oversized = [
+        "Implement the scroll stage: src/landing/scroll.css, src/landing/scroll.js",
+        "Wire IO events: src/landing/io.js, src/landing/events.js",
+        "Fix EN copy in src/landing/copy-en.json and VI copy in src/landing/copy-vi.json",
+        "Write the handoff doc: docs/landing/IMPLEMENTATION.md"
+      ].join("\n");
+      const dispatch = await mgr.dispatchTask(worker.workerId, oversized);
+      expect(dispatch.warnings).toBeTruthy();
+      expect(dispatch.warnings!.length).toBeGreaterThan(0);
+      expect(dispatch.warnings![0]).toMatch(/bundle multiple workstreams/i);
+      expect(dispatch.warnings![0]).toMatch(/conversation persists/i);
+      // The job still runs normally — advisory, not blocking.
+      expect(["queued", "running"]).toContain(dispatch.status);
+      await mgr.waitTaskUntilTerminal(dispatch.jobId);
+
+      const focused = await mgr.dispatchTask(worker.workerId, "Adjust the hero headline copy in src/landing/copy-en.json");
+      expect((focused as { warnings?: string[] }).warnings).toBeUndefined();
+      await mgr.waitTaskUntilTerminal(focused.jobId);
+      await mgr.closeWorker(worker.workerId);
+    });
+
     it("deduplicates a request key and rejects a conflicting retry", async () => {
       const { mgr } = makeManager();
       const worker = await mgr.createWorker({ role: "tester", workspace: process.cwd() });

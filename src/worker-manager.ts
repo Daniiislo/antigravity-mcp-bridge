@@ -23,6 +23,15 @@ export interface DispatchOptions {
   totalDurationSeconds?: number | undefined;
 }
 
+export interface DispatchTaskResult {
+  jobId: string;
+  workerId: string;
+  role: Role;
+  status: JobStatus;
+  /** Advisory: present when the brief looks like multiple bundled workstreams. */
+  warnings?: string[];
+}
+
 export interface CreateWorkerOptions {
   requiredTools?: string[] | undefined;
   role: Role;
@@ -231,7 +240,7 @@ export class WorkerManager {
       "WORKFLOW",
       "1. list_models (refresh: true) before pinning any non-default model or effort on create_worker; pass only IDs that command printed. An invalid model fails the whole dispatch.",
       "2. create_worker once per role (implementer edits; tester reviews in plan mode). One worker per role is enough; resume it for related fixes.",
-      "3. dispatch_task with a decision-complete brief. One coherent workstream per dispatch: size the brief so it finishes within the deadline. A fresh conversation also spends time reading files before editing.",
+      "3. dispatch_task with a decision-complete brief. One coherent workstream per dispatch: size the brief so it finishes within the deadline. A fresh conversation also spends time reading files before editing. A dispatch warning says the brief bundles multiple workstreams: split follow-ups into separate jobs on the same worker (its conversation persists, so context is not lost). Splitting costs nothing; a deadline kill costs the whole turn.",
       "4. wait_task once per job; it stays pending until terminal. Never poll status or events while a wait is possible. Host tool timeout must exceed the job deadline.",
       "5. Accept a terminal result only when: status succeeded, response non-empty, no denied actions, and required verification actually ran. A SUCCESS with an empty response or denied actions is failure.",
       "6. inspect_task / agy_events only for failure diagnostics; not after a successful wait.",
@@ -329,7 +338,7 @@ export class WorkerManager {
     timeoutSeconds?: number | undefined,
     maxDurationSeconds?: number | undefined,
     options: DispatchOptions = {}
-  ): Promise<{ jobId: string; workerId: string; role: Role; status: JobStatus }> {
+  ): Promise<DispatchTaskResult> {
     if (!brief.trim()) throw new Error("brief must not be empty");
     if (options.requestKey !== undefined && (!options.requestKey.trim() || options.requestKey.length > 128)) {
       throw new Error("request key must contain 1-128 characters");
@@ -460,12 +469,38 @@ export class WorkerManager {
     }
     this.processWorkerQueue(worker);
 
+    // Oversized-brief advisory: catch multi-workstream bundling at the
+    // decision point instead of at the deadline. Soft signal, never blocks —
+    // the job is already queued; the controller can still split follow-ups.
+    const warnings = this.briefWarnings(brief, totalMs / 1_000);
+
     return {
       jobId,
       workerId,
       role: worker.role,
-      status: job.status
+      status: job.status,
+      ...(warnings.length > 0 ? { warnings } : {})
     };
+  }
+
+  /**
+   * Heuristic advisory for briefs that bundle several workstreams into one
+   * turn. Evidence from failed runs: briefs mixing 3-4 workstreams with many
+   * file targets (2.5k-4.5k chars) died at the deadline while focused
+   * single-workstream briefs finished comfortably. Warn so the controller can
+   * split into sequential dispatches on the same worker (conversation persists
+   * between jobs, so context is not lost).
+   */
+  private briefWarnings(brief: string, deadlineSeconds: number): string[] {
+    const fileTargets = new Set(
+      [...brief.matchAll(/[A-Za-z0-9_.-]+[\\/][A-Za-z0-9_.\\/-]+/g)].map((m) => m[0])
+    ).size;
+    if (brief.length <= 3_000 && fileTargets <= 5) return [];
+    return [
+      `Oversized brief: ${brief.length} chars, ${fileTargets} distinct file targets, ${deadlineSeconds}s deadline. ` +
+      "This brief appears to bundle multiple workstreams into one turn. " +
+      "Split it: dispatch each workstream as its own job on this same worker — the conversation persists between jobs, so the worker keeps context without re-reading everything."
+    ];
   }
 
   async sendFollowup(

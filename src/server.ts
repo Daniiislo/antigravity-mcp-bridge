@@ -93,7 +93,10 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
         max_duration_seconds,
         { requestKey: request_key, totalDurationSeconds: total_duration_seconds }
       );
-      return success(result, `Dispatched task ${result.jobId} to ${result.role} worker ${result.workerId} (status: ${result.status}).`);
+      const summary = result.warnings && result.warnings.length > 0
+        ? `Dispatched task ${result.jobId} to ${result.role} worker ${result.workerId} (status: ${result.status}). WARNING: ${result.warnings.join(" ")}`
+        : `Dispatched task ${result.jobId} to ${result.role} worker ${result.workerId} (status: ${result.status}).`;
+      return success(result, summary);
     } catch (error) {
       return failure(error);
     }
