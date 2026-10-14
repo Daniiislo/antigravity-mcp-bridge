@@ -42,10 +42,15 @@ describe("workspace boundary", () => {
 
 describe("per-user config file", () => {
   it("resolves the config path under the user home unless overridden", () => {
-    expect(resolveUserConfigPath({}, "C:\\Users\\Ada"))
-      .toBe("C:\\Users\\Ada\\.antigravity-bridge\\config.json");
-    expect(resolveUserConfigPath({ AGY_USER_CONFIG: "D:\\cfg\\bridge.json" }, "C:\\Users\\Ada"))
-      .toBe("D:\\cfg\\bridge.json");
+    // Platform-neutral paths: path.join behavior differs between win32 and posix,
+    // so build both input and expectation with the same separators.
+    const home = path.join("home", "ada");
+    expect(resolveUserConfigPath({}, home))
+      .toBe(path.join(home, ".antigravity-bridge", "config.json"));
+
+    const override = path.join("tmp", "bridge.json");
+    expect(resolveUserConfigPath({ AGY_USER_CONFIG: override }, home))
+      .toBe(path.resolve(override));
   });
 
   it("reads allowed_roots from the config file", () => {
