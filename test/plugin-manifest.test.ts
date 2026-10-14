@@ -100,6 +100,12 @@ describe("Agent Plugins Manifests", () => {
     expect(existsSync(path.join(pluginDir, ".mcp.json"))).toBe(true);
     expect(existsSync(path.join(pluginDir, "dist", "index.js"))).toBe(true);
 
+    // Production dependencies are bundled (same pattern as OpenAI's bundled
+    // browser plugin) so installs never run npm.
+    for (const dep of ["@modelcontextprotocol/server", "@modelcontextprotocol/ext-tasks", "zod"]) {
+      expect(existsSync(path.join(pluginDir, "node_modules", dep))).toBe(true);
+    }
+
     // Root-level plugin.json/mcp.json would shadow the .codex-plugin manifest and
     // break `codex plugin add` with "missing or invalid plugin.json".
     expect(existsSync(path.join(pluginDir, "plugin.json"))).toBe(false);
