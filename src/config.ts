@@ -177,7 +177,7 @@ export function loadConfig(
   const defaultTimeoutMs = (env.AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS !== undefined
     ? positiveInteger(env, "AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS", 300)
     : positiveInteger(env, "AGY_DEFAULT_TIMEOUT_SECONDS", 300)) * 1_000;
-  const maxTurnTimeoutMs = positiveInteger(env, "AGY_MAX_TURN_SECONDS", 600) * 1_000;
+  const maxTurnTimeoutMs = positiveInteger(env, "AGY_MAX_TURN_SECONDS", 1_800) * 1_000;
   if (maxTurnTimeoutMs < defaultTimeoutMs) {
     throw new Error("AGY_MAX_TURN_SECONDS must be greater than or equal to the inactivity timeout");
   }

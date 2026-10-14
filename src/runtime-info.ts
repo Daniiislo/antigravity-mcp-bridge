@@ -12,7 +12,7 @@ export function runtimeInfo(config: BridgeConfig) {
     build_id: hash.digest("hex").slice(0, 16),
     wait_mode: "terminal",
     inactivity_seconds: config.defaultTimeoutMs / 1_000,
-    maximum_turn_seconds: (config.maxTurnTimeoutMs ?? 600_000) / 1_000,
+    maximum_turn_seconds: (config.maxTurnTimeoutMs ?? 1_800_000) / 1_000,
     steps_budget: config.maxSteps ?? null,
     observed_token_budget: config.maxTurnTokens ?? null,
     tasks_capability_gated: true

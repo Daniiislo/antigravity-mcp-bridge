@@ -93,6 +93,22 @@ input.on("line", (line) => {
     return;
   }
   if (content === "HANG") return;
+  if (typeof content === "string" && content.startsWith("GRACEFUL:")) {
+    // Simulates a worker that keeps exploring until told to finish, then wraps
+    // up with a final summary: the graceful-finish path of the bridge.
+    process.stdout.write(JSON.stringify({ event: "step_update", step_update: {
+      conversation_id: conversationId, step_index: turns, state: "RUNNING", step_type: "tool_use", text_delta: "exploring"
+    } }) + "\n");
+    return;
+  }
+  if (typeof content === "string" && content.includes("FINISH_NOW")) {
+    process.stdout.write(JSON.stringify({ event: "result", result: {
+      conversation_id: conversationId, status: "SUCCESS", response: "reply:graceful-done",
+      duration_seconds: 0.01, num_turns: turns,
+      usage: { input_tokens: 1, output_tokens: 1, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 2 }
+    } }) + "\n");
+    return;
+  }
   if (typeof content === "string" && content.startsWith("SPAWN_CHILD_HANG:")) {
     const pidFile = content.slice("SPAWN_CHILD_HANG:".length);
     const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 10_000)"], {

@@ -101,7 +101,7 @@ describe("configuration", () => {
   it("supports an inactivity timeout plus a separate absolute cap while honoring the legacy alias", () => {
     const defaults = loadConfig({}, process.cwd(), { resolveExecutable: false });
     expect(defaults.defaultTimeoutMs).toBe(300_000);
-    expect(defaults.maxTurnTimeoutMs).toBe(600_000);
+    expect(defaults.maxTurnTimeoutMs).toBe(1_800_000);
     expect(defaults.maxSteps).toBeUndefined();
     expect(defaults.maxTurnTokens).toBeUndefined();
 

@@ -148,6 +148,25 @@ describe("AgyWorker", () => {
     expect(worker.status().state).toBe("stopped");
   });
 
+  it("requests a graceful finish by writing a FINISH_NOW user event to the CLI stdin", async () => {
+    const worker = createWorker();
+    await worker.delegate("warm-up");
+    let finishRequested = false;
+    const inFlight = worker.delegate("GRACEFUL:HANG", 5_000).then((result) => {
+      expect(finishRequested).toBe(true);
+      expect(result.response).toContain("reply:graceful-done");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    finishRequested = worker.requestGracefulFinish();
+    expect(finishRequested).toBe(true);
+    await inFlight;
+  });
+
+  it("refuses a graceful finish when no turn is active", () => {
+    const worker = createWorker();
+    expect(worker.requestGracefulFinish()).toBe(false);
+  });
+
   it("stops before starting a step beyond the configured step budget", async () => {
     const worker = createWorker();
     await expect(worker.delegate("BUDGET_LOOP:10:15:1", {

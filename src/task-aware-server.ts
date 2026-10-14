@@ -87,6 +87,7 @@ function statusForJob(status: string): DetailedTaskV2["status"] {
     case "succeeded": return "completed";
     case "failed": return "failed";
     case "canceled": return "cancelled";
+    case "orphaned": return "failed";
     default: return "working";
   }
 }
@@ -103,7 +104,8 @@ export class TaskAwareServer {
       capabilities: {
         tools: { listChanged: false },
         extensions: { [TASKS_EXTENSION_ID_V2]: {} }
-      }
+      },
+      instructions: this.manager.serverInstructions()
     });
     this.installHandlers();
   }
@@ -215,7 +217,7 @@ export class TaskAwareServer {
     };
 
     let result: DetailedTaskV2 & { resultType: "complete" };
-    if ((job.status === "queued" || job.status === "running") && !this.manager.hasLiveJob(jobId)) {
+    if ((job.status === "queued" || job.status === "running" || job.status === "orphaned") && !this.manager.hasLiveJob(jobId)) {
       result = {
         ...base,
         status: "failed",

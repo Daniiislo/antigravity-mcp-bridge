@@ -16,7 +16,7 @@ import { DashboardServer } from "./dashboard-server.js";
 import { checkRequiredTools } from "./preflight.js";
 import { runtimeInfo } from "./runtime-info.js";
 
-export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
+export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled" | "orphaned";
 
 export interface DispatchOptions {
   requestKey?: string | undefined;
@@ -72,6 +72,7 @@ export interface JobRecord {
   requestKey?: string | undefined;
   requestFingerprint?: string | undefined;
   deadlineTimer?: NodeJS.Timeout | undefined;
+  gracefulFinishTimer?: NodeJS.Timeout | undefined;
   deadlineAt?: string | undefined;
   totalDurationSeconds?: number | undefined;
   status: JobStatus;
@@ -216,6 +217,44 @@ export class WorkerManager {
 
   getRuntimeInfo() { return runtimeInfo(this.config); }
 
+  /**
+   * Usage protocol served to the host agent through the MCP initialize result.
+   * Generated from live config so every bridge version teaches its own current
+   * rules — no external skill or cached documentation can drift from it.
+   */
+  serverInstructions(): string {
+    const info = runtimeInfo(this.config);
+    return [
+      "You are the controller for Antigravity CLI workers managed by this bridge.",
+      "This server defines its own usage protocol; follow it instead of any remembered or externally documented procedure.",
+      "",
+      "WORKFLOW",
+      "1. list_models (refresh: true) before pinning any non-default model or effort on create_worker; pass only IDs that command printed. An invalid model fails the whole dispatch.",
+      "2. create_worker once per role (implementer edits; tester reviews in plan mode). One worker per role is enough; resume it for related fixes.",
+      "3. dispatch_task with a decision-complete brief. One coherent workstream per dispatch: size the brief so it finishes within the deadline. A fresh conversation also spends time reading files before editing.",
+      "4. wait_task once per job; it stays pending until terminal. Never poll status or events while a wait is possible. Host tool timeout must exceed the job deadline.",
+      "5. Accept a terminal result only when: status succeeded, response non-empty, no denied actions, and required verification actually ran. A SUCCESS with an empty response or denied actions is failure.",
+      "6. inspect_task / agy_events only for failure diagnostics; not after a successful wait.",
+      "",
+      `LIMITS (live from this build; do not assume other values)`,
+      `- Inactivity timeout: ${info.inactivity_seconds}s without a meaningful progress event terminates the turn.`,
+      `- Total deadline: ${info.maximum_turn_seconds}s default per job (dispatch total_duration_seconds may lower it). ${info.maximum_turn_seconds <= 600 ? "Keep briefs to 1-2 focused file edits." : "Near the deadline the bridge asks the worker to wrap up (FINISH_NOW); a result returned in that grace window is a normal handoff."}`,
+      ...(info.steps_budget !== null ? [`- Step budget: ${info.steps_budget} steps per turn.`] : []),
+      ...(info.observed_token_budget !== null ? [`- Observed token budget: ${info.observed_token_budget} per turn.`] : []),
+      "",
+      "FAILURE HANDLING",
+      "- max_duration timeout: the brief did not fit the deadline. Do NOT re-dispatch the same brief, and do not escalate timeouts on one brief. Resume the same worker with a small inventory-and-finish brief covering only the remaining delta; never rewrite completed files.",
+      "- inactivity timeout while progress shows an ACTIVE compose step: the turn was generating a large output quietly. Retry once with a higher inactivity_timeout_seconds instead of restarting from scratch.",
+      "- Service-side 503/eligibility errors: BLOCKED for that worker, not a retry signal. Report or switch model once; do not loop dispatches.",
+      "- ORPHANED_JOB (job stuck queued/running from a previous bridge session): its process is dead. Inspect the partial diff and dispatch a new bounded job under a new request key.",
+      "- Timeout preserves the worker conversation: check the workspace diff before writing any salvage brief.",
+      "",
+      "RECOVERY",
+      "- agy_history recovers job summaries after a bridge/MCP restart; inspect_task the persisted job for detail.",
+      "- cancel_task obsolete jobs (cancelling an active turn invalidates that conversation); close_worker when the checkpoint is accepted."
+    ].join("\n");
+  }
+
   async createWorker(options: CreateWorkerOptions): Promise<ExplicitWorkerInfo> {
     const workspace = resolveAllowedWorkspace(options.workspace, this.config.allowedRoots);
     checkRequiredTools(options.requiredTools ?? []);
@@ -315,7 +354,7 @@ export class WorkerManager {
       }
       if (persisted) {
         if (persisted.request_fingerprint !== requestFingerprint) throw new Error("Conflicting retry for request key");
-        if (persisted.status === "queued" || persisted.status === "running") throw new Error(`ORPHANED_JOB: ${persisted.job_id}; inspect the original job before replacement`);
+        if (persisted.status === "queued" || persisted.status === "running" || persisted.status === "orphaned") throw new Error(`ORPHANED_JOB: ${persisted.job_id}; inspect the original job before replacement`);
         return { jobId: persisted.job_id, workerId: persisted.worker_id, role: persisted.role as Role, status: persisted.status as JobStatus };
       }
     }
@@ -398,12 +437,27 @@ export class WorkerManager {
     job.deadlineTimer = setTimeout(() => {
       if (job.status === "running") {
         const error = new AgyTimeoutError("max_duration", totalMs);
-        error.message = `Total job deadline exceeded during execution after ${totalMs}ms`;
+        error.message = `Total job deadline exceeded during execution after ${totalMs}ms. The brief did not fit the deadline. Inspect the workspace diff, then resume the same worker with a small inventory-and-finish brief covering only the remaining delta — do not re-dispatch the same brief.`;
         worker.worker.interruptActiveTurn(error);
       } else if (job.status === "queued") {
         this.expireQueuedJob(worker, job);
       }
     }, Math.max(0, Date.parse(deadlineAt) - Date.now()));
+
+    // Graceful deadline: shortly before the hard deadline, ask the CLI to wrap
+    // up and hand off what it has. A turn that returns a terminal result within
+    // the grace window succeeds and preserves the conversation, so partial work
+    // is handed back instead of being killed mid-write.
+    const GRACE_WINDOW_MS = 45_000;
+    const gracefulDelayMs = Math.max(0, Date.parse(deadlineAt) - Date.now() - GRACE_WINDOW_MS);
+    if (gracefulDelayMs > 0) {
+      job.gracefulFinishTimer = setTimeout(() => {
+        if (job.status === "running" && !worker.worker.requestGracefulFinish()) {
+          // The CLI could not accept a finish request (process gone or between
+          // turns); the hard deadline still applies.
+        }
+      }, gracefulDelayMs);
+    }
     this.processWorkerQueue(worker);
 
     return {
@@ -497,7 +551,7 @@ export class WorkerManager {
     if (!job) {
       const persisted = this.eventStore.readDiskJob(jobId);
       if (!persisted) throw new Error(`Job not found: ${jobId}`);
-      if (persisted.status === "queued" || persisted.status === "running") {
+      if (persisted.status === "queued" || persisted.status === "running" || persisted.status === "orphaned") {
         throw new Error(`ORPHANED_JOB: ${jobId} was ${persisted.status} when the bridge stopped and cannot be resumed safely`);
       }
       return { ...this.inspectTask(jobId), terminal: true };
@@ -666,7 +720,7 @@ export class WorkerManager {
       throw new Error(`Job not found: ${jobId}`);
     }
 
-    if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled") {
+    if (job.status === "succeeded" || job.status === "failed" || job.status === "canceled" || job.status === "orphaned") {
       return { jobId, status: job.status, active: false };
     }
 
@@ -675,6 +729,7 @@ export class WorkerManager {
 
     job.status = "canceled";
     if (job.deadlineTimer) clearTimeout(job.deadlineTimer);
+    if (job.gracefulFinishTimer) clearTimeout(job.gracefulFinishTimer);
     job.finishedAt = new Date().toISOString();
 
     if (isActive && worker) {
@@ -707,6 +762,7 @@ export class WorkerManager {
 
     for (const qJob of worker.queue) {
       if (qJob.deadlineTimer) clearTimeout(qJob.deadlineTimer);
+      if (qJob.gracefulFinishTimer) clearTimeout(qJob.gracefulFinishTimer);
       qJob.status = "canceled";
       qJob.finishedAt = new Date().toISOString();
       this.eventStore.recordEvent({
@@ -725,6 +781,7 @@ export class WorkerManager {
     if (worker.activeJob) {
       const activeJob = worker.activeJob;
       if (activeJob.deadlineTimer) clearTimeout(activeJob.deadlineTimer);
+      if (activeJob.gracefulFinishTimer) clearTimeout(activeJob.gracefulFinishTimer);
       activeJob.status = "canceled";
       activeJob.finishedAt = new Date().toISOString();
       worker.worker.cancelActiveTurn("Worker was closed by controller");
@@ -1011,7 +1068,10 @@ export class WorkerManager {
     const selected = role ? [role] : (["implementer", "tester"] as Role[]);
     await Promise.all(selected.map(async (item) => this.implicitWorkers.get(item)?.stop()));
     if (!role) {
-      for (const job of this.jobs.values()) if (job.deadlineTimer) clearTimeout(job.deadlineTimer);
+      for (const job of this.jobs.values()) {
+        if (job.deadlineTimer) clearTimeout(job.deadlineTimer);
+        if (job.gracefulFinishTimer) clearTimeout(job.gracefulFinishTimer);
+      }
       await Promise.all(Array.from(this.explicitWorkers.values()).map((w) => w.worker.stop()));
       if (this.dashboardServer) {
         await this.dashboardServer.stop();
@@ -1106,6 +1166,7 @@ export class WorkerManager {
 
   private expireQueuedJob(worker: ExplicitWorkerInternal, job: JobRecord): void {
     if (job.deadlineTimer) clearTimeout(job.deadlineTimer);
+    if (job.gracefulFinishTimer) clearTimeout(job.gracefulFinishTimer);
     job.status = "failed";
     job.finishedAt = new Date().toISOString();
     job.error = "Total job deadline exceeded in queue; turn was not started";
@@ -1211,6 +1272,7 @@ export class WorkerManager {
         }
       } finally {
         if (nextJob.deadlineTimer) clearTimeout(nextJob.deadlineTimer);
+        if (nextJob.gracefulFinishTimer) clearTimeout(nextJob.gracefulFinishTimer);
         worker.activeJob = undefined;
         if (worker.status !== "closed") {
           worker.status = worker.queue.length > 0 ? "busy" : "idle";

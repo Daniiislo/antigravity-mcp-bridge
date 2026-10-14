@@ -385,6 +385,25 @@ export class EventStore extends EventEmitter {
         }
         if (!usage && cumulativeUsage && !hasModernCumulativeUsage) usage = cumulativeUsage;
 
+        // A run file that never reached a terminal lifecycle state cannot prove
+        // its child process survived a bridge restart. Older builds left such
+        // jobs reporting "running" forever, misleading controllers into waiting
+        // on dead work. Mark clearly-stale non-terminal records as orphaned.
+        const NON_TERMINAL_STATUSES = new Set(["queued", "running"]);
+        if (NON_TERMINAL_STATUSES.has(status) && finishedAt === undefined) {
+          let lastEventTime = NaN;
+          try {
+            const lastLine = JSON.parse(lines[lines.length - 1] as string) as { timestamp?: string };
+            if (lastLine?.timestamp) lastEventTime = Date.parse(lastLine.timestamp);
+          } catch { /* malformed last line; treat as unknown age */ }
+          if (!Number.isFinite(lastEventTime) && createdAt) lastEventTime = Date.parse(createdAt);
+          const ageMs = Number.isFinite(lastEventTime) ? Date.now() - lastEventTime : Infinity;
+          if (ageMs > 6 * 60 * 60 * 1_000) {
+            status = "orphaned";
+            error = "Bridge stopped before this job reached a terminal state; its process cannot be resumed. Inspect the partial diff and dispatch a new bounded job instead of retrying this ID.";
+          }
+        }
+
         if (jobId && !seenJobIds.has(jobId)) {
           seenJobIds.add(jobId);
           summaries.push({
@@ -481,7 +500,7 @@ export class EventStore extends EventEmitter {
     }
 
     if (options.terminalOnly) {
-      candidates = candidates.filter((s: JobHistorySummary) => ["succeeded", "failed", "canceled"].includes(s.status));
+      candidates = candidates.filter((s: JobHistorySummary) => ["succeeded", "failed", "canceled", "orphaned"].includes(s.status));
     }
 
     if (options.status) {
@@ -525,7 +544,7 @@ export class EventStore extends EventEmitter {
     worker_id: string;
     role: "implementer" | "tester";
     workspace: string;
-    status: "queued" | "running" | "succeeded" | "failed" | "canceled";
+    status: "queued" | "running" | "succeeded" | "failed" | "canceled" | "orphaned";
     brief: string;
     effective_prompt: string;
     created_at: string;
@@ -571,7 +590,7 @@ export class EventStore extends EventEmitter {
       let workerId = "";
       let role: "implementer" | "tester" = "implementer";
       let workspace = "";
-      let status: "queued" | "running" | "succeeded" | "failed" | "canceled" = "queued";
+      let status: "queued" | "running" | "succeeded" | "failed" | "canceled" | "orphaned" = "queued";
       let brief = "";
       let effectivePrompt = "";
       let createdAt = "";
@@ -727,6 +746,17 @@ export class EventStore extends EventEmitter {
         durationSeconds = cliDurationSeconds;
       }
       if (!usage && cumulativeUsage && !hasModernCumulativeUsage) usage = cumulativeUsage;
+
+      // Same orphan marking as readDiskHistory: a run file that never reached a
+      // terminal state cannot be resumed after a bridge restart.
+      if ((status === "queued" || status === "running") && finishedAt === undefined) {
+        const referenceTime = Date.parse(lastActivityAt || createdAt);
+        const ageMs = Number.isFinite(referenceTime) ? Date.now() - referenceTime : Infinity;
+        if (ageMs > 6 * 60 * 60 * 1_000) {
+          status = "orphaned";
+          error = "Bridge stopped before this job reached a terminal state; its process cannot be resumed. Inspect the partial diff and dispatch a new bounded job instead of retrying this ID.";
+        }
+      }
 
       const MAX_DENIED = 20;
       const totalDenied = deniedActions.length;

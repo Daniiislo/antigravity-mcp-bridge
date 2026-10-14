@@ -203,6 +203,22 @@ export class AgyWorker {
     if (this.pending) void this.invalidate(error, true);
   }
 
+  /**
+   * Request graceful completion of the active turn: the CLI is asked to wrap up
+   * and return its terminal result before the hard deadline kills the process.
+   * Returns true when a turn is active and a finish request was sent.
+   */
+  requestGracefulFinish(): boolean {
+    if (!this.pending || !this.child || this.terminating) return false;
+    const line = JSON.stringify({ event: "user", message: { content: "FINISH_NOW: Stop further exploration and edits. Summarize exactly what you completed, verified, and what remains unfinished in a concise final response now." } }) + "\n";
+    try {
+      this.child.stdin.write(line);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private runTurn(task: string, inactivityTimeoutMs: number, maxDurationMs: number, maxSteps: number, maxTokens: number): Promise<DelegationResult> {
     this.ensureStarted();
     if (!this.child) return Promise.reject(new Error("Antigravity worker did not start"));
@@ -347,13 +363,20 @@ export class AgyWorker {
     this.lastCumulativeUsage = cumulativeUsage;
     this.usageBaselineTrusted = true;
     if (result.status !== "SUCCESS") {
-      void this.invalidate(new Error(result.error || `Antigravity ended with status ${result.status}`), true, true);
+      const errorText = result.error || `Antigravity ended with status ${result.status}`;
+      const guidance = /UNAVAILABLE|503|eligibility|quota/i.test(errorText)
+        ? " Service-side availability/quota error: treat this worker as BLOCKED, not a retry signal — do not re-dispatch the same brief against it."
+        : "";
+      void this.invalidate(new Error(errorText + guidance), true, true);
       return;
     }
     if (!result.response.trim()) {
       const deniedCount = Array.isArray(result.denied_actions) ? result.denied_actions.length : 0;
       const deniedMsg = deniedCount > 0 ? ` (${deniedCount} action(s) denied)` : "";
-      void this.invalidate(new Error(`Antigravity returned SUCCESS with an empty response${deniedMsg}`), true, true);
+      const guidance = deniedCount > 0
+        ? " Denied actions mean a required permission was not granted: fix the narrow permission cause and retry deliberately; never widen permissions silently."
+        : "";
+      void this.invalidate(new Error(`Antigravity returned SUCCESS with an empty response${deniedMsg}.${guidance}`), true, true);
       return;
     }
     const pending = this.pending;
@@ -384,7 +407,9 @@ export class AgyWorker {
     if (!pending) return;
     if (pending.inactivityTimer) clearTimeout(pending.inactivityTimer);
     pending.inactivityTimer = setTimeout(() => {
-      void this.invalidate(new AgyTimeoutError("inactivity", pending.inactivityTimeoutMs), true);
+      const err = new AgyTimeoutError("inactivity", pending.inactivityTimeoutMs);
+      err.message = `${err.message}. No progress event arrived for ${pending.inactivityTimeoutMs}ms — the turn may have been generating one large quiet output. Check last_progress: if it shows an ACTIVE step, retry once with a higher inactivity_timeout_seconds instead of restarting from scratch.`;
+      void this.invalidate(err, true);
     }, pending.inactivityTimeoutMs);
   }
 
