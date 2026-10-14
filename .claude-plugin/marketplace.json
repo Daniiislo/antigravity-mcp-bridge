@@ -1,0 +1,19 @@
+{
+  "name": "antigravity-bridge",
+  "owner": {
+    "name": "Daniiislo"
+  },
+  "metadata": {
+    "description": "Antigravity MCP Bridge — coordinate persistent Antigravity CLI workers",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "antigravity-mcp-bridge",
+      "source": "./plugins/antigravity-mcp-bridge",
+      "description": "MCP server that lets Claude Code coordinate persistent Antigravity CLI workers as implementers and testers.",
+      "version": "0.2.0",
+      "category": "Developer Tools"
+    }
+  ]
+}

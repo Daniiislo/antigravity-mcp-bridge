@@ -35,39 +35,73 @@ codex plugin list
 
 The bridge registers an MCP server named `antigravity-bridge` with 18 tools. Restart Codex after installing.
 
-**Which directory can workers touch?** By default the bridge allows the directory it starts in. To let workers edit any project under a folder (or a whole drive), set `AGY_ALLOWED_ROOTS` in the plugin MCP config (see [Configuration](#configuration)) — for example `C:\Projects` or `$HOME/Projects`; repeat roots with the OS path separator (`;` on Windows, `:` elsewhere).
+## Install (Claude Code)
 
-## Install (Claude Code / any MCP host)
-
-Any MCP host can run the server directly:
+Claude Code has the same marketplace flow:
 
 ```bash
-claude mcp add antigravity-bridge -- node "<path>/dist/index.js"
+claude plugin marketplace add Daniiislo/antigravity-mcp-bridge
+claude plugin install antigravity-mcp-bridge@antigravity-bridge
 ```
 
-Point `AGY_ALLOWED_ROOTS` at your project directories (see [Configuration](#configuration)). The prebuilt server lives in the plugin directory; fetch it with `git clone https://github.com/Daniiislo/antigravity-mcp-bridge.git` and use `dist/index.js` from the clone — no build step needed.
+Verify:
+
+```bash
+claude plugin list
+```
+
+Restart Claude Code after installing.
+
+## Which directory can workers touch?
+
+By default the bridge allows the directory it starts in. To let workers edit any project under a folder (or a whole drive), set `AGY_ALLOWED_ROOTS` in the plugin MCP config (see [Configuration](#configuration)) — for example `C:\Projects` or `$HOME/Projects`; repeat roots with the OS path separator (`;` on Windows, `:` elsewhere).
+
+## Any other MCP host
+
+Any MCP host can run the server directly from a clone — the repository ships prebuilt artifacts, no build step:
+
+```bash
+git clone https://github.com/Daniiislo/antigravity-mcp-bridge.git
+```
+
+Then point your host at `<clone>/plugins/antigravity-mcp-bridge/dist/index.js` with `AGY_ALLOWED_ROOTS` set to your project directories (see [Configuration](#configuration)).
 
 ## Update
 
+Codex:
+
 ```bash
 codex plugin marketplace upgrade
-```
-
-Then remove and re-add the plugin to pick up the new version:
-
-```bash
-codex plugin remove antigravity-mcp-bridge
+codex plugin remove antigravity-mcp-bridge@antigravity-bridge
 codex plugin add antigravity-mcp-bridge
 ```
 
-## Uninstall
+Claude Code:
 
 ```bash
-codex plugin remove antigravity-mcp-bridge
+claude plugin marketplace update antigravity-bridge
+claude plugin update antigravity-mcp-bridge
+```
+
+If removal reports a file lock, exit Codex Desktop / Claude Code first (a running host keeps the cache files open) and retry.
+
+## Uninstall
+
+Codex:
+
+```bash
+codex plugin remove antigravity-mcp-bridge@antigravity-bridge
 codex plugin marketplace remove antigravity-bridge
 ```
 
-This removes the plugin and marketplace registration. Run logs (under the OS state directory, see [Configuration](#configuration)) stay on disk.
+Claude Code:
+
+```bash
+claude plugin uninstall antigravity-mcp-bridge
+claude plugin marketplace remove antigravity-bridge
+```
+
+If removal reports a file lock, exit the host app first. This removes the plugin and marketplace registration; run logs (under the OS state directory, see [Configuration](#configuration)) stay on disk.
 
 ## Controller API
 

@@ -1,0 +1,19 @@
+{
+  "name": "antigravity-mcp-bridge",
+  "version": "0.2.0",
+  "description": "Local MCP bridge for coordinating persistent Antigravity CLI workers",
+  "author": {
+    "name": "Daniiislo"
+  },
+  "homepage": "https://github.com/Daniiislo/antigravity-mcp-bridge#readme",
+  "repository": "https://github.com/Daniiislo/antigravity-mcp-bridge",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "antigravity",
+    "worker-orchestration",
+    "codex",
+    "claude"
+  ],
+  "mcpServers": "./.mcp.json"
+}

@@ -96,8 +96,12 @@ describe("Agent Plugins Manifests", () => {
     // a dedicated subdirectory holding .codex-plugin/plugin.json + .mcp.json + runtime code,
     // never mixed into the repository root.
     const pluginDir = path.join(root, "plugins", "antigravity-mcp-bridge");
+    // Both host manifests ship: .codex-plugin for Codex, .claude-plugin for
+    // Claude Code — same pattern as mem0, one repo serving both hosts.
     expect(existsSync(path.join(pluginDir, ".codex-plugin", "plugin.json"))).toBe(true);
+    expect(existsSync(path.join(pluginDir, ".claude-plugin", "plugin.json"))).toBe(true);
     expect(existsSync(path.join(pluginDir, ".mcp.json"))).toBe(true);
+    expect(existsSync(path.join(root, ".claude-plugin", "marketplace.json"))).toBe(true);
     expect(existsSync(path.join(pluginDir, "dist", "index.js"))).toBe(true);
 
     // Production dependency closure is bundled (same pattern as OpenAI's
@@ -120,6 +124,10 @@ describe("Agent Plugins Manifests", () => {
     const pluginManifest = JSON.parse(readFileSync(path.join(pluginDir, ".codex-plugin", "plugin.json"), "utf8"));
     expect(pluginManifest.name).toBe("antigravity-mcp-bridge");
     expect(pluginManifest.mcpServers).toBe("./.mcp.json");
+
+    const claudeManifest = JSON.parse(readFileSync(path.join(pluginDir, ".claude-plugin", "plugin.json"), "utf8"));
+    expect(claudeManifest.name).toBe("antigravity-mcp-bridge");
+    expect(claudeManifest.mcpServers).toBe("./.mcp.json");
 
     const mcp = JSON.parse(readFileSync(path.join(pluginDir, ".mcp.json"), "utf8"));
     const server = mcp.mcpServers["antigravity-bridge"];
