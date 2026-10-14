@@ -90,4 +90,31 @@ describe("Agent Plugins Manifests", () => {
     expect(raw).not.toContain("/home/");
     expect(raw).not.toContain("/Users/");
   });
+
+  it("marketplace.json is portable: relative plugin path, installable from any clone", () => {
+    const marketplaceJsonPath = path.join(root, ".agents", "plugins", "marketplace.json");
+    expect(existsSync(marketplaceJsonPath)).toBe(true);
+
+    const raw = readFileSync(marketplaceJsonPath, "utf8");
+    const marketplace = JSON.parse(raw);
+
+    // The marketplace identity must not leak a development-machine name
+    expect(marketplace.name).toBe("antigravity-bridge");
+
+    const entry = marketplace.plugins?.find((p: { name: string }) => p.name === "antigravity-mcp-bridge");
+    expect(entry).toBeDefined();
+
+    // The plugin source must be relative so any clone location works
+    expect(entry.source.path).toBe(".");
+    expect(() => JSON.stringify(entry.source.path)).not.toThrow();
+    expect(existsSync(path.resolve(root, entry.source.path, "plugin.json"))).toBe(true);
+
+    // No machine-specific absolute paths anywhere in the catalog
+    expect(raw).not.toMatch(/(?:^|[\s"'`=])([a-zA-Z]:[\\/])/);
+    expect(raw).not.toContain("F:\\");
+    expect(raw).not.toContain("C:\\");
+    expect(raw).not.toContain("C:/");
+    expect(raw).not.toContain("/home/");
+    expect(raw).not.toContain("/Users/");
+  });
 });

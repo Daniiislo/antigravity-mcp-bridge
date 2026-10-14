@@ -1,14 +1,14 @@
 {
-  "name": "local-marketplace",
+  "name": "antigravity-bridge",
   "interface": {
-    "displayName": "Local Plugins"
+    "displayName": "Antigravity Bridge"
   },
   "plugins": [
     {
       "name": "antigravity-mcp-bridge",
       "source": {
         "source": "local",
-        "path": "F:\\Antigravity MCP Bridge"
+        "path": "."
       },
       "policy": {
         "installation": "AVAILABLE",

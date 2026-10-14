@@ -3,7 +3,7 @@
     "antigravity-bridge": {
       "command": "node",
       "args": [
-        "dist/index.js"
+        "./dist/index.js"
       ],
       "env": {
         "AGY_ALLOWED_ROOTS": ".",
