@@ -1,9 +1,9 @@
 node_modules/
-# dist/ is shipped in the Git marketplace snapshot so `codex plugin marketplace
-# upgrade` delivers prebuilt artifacts; installs never run a build step.
+# dist/ trees are shipped in the Git marketplace snapshot so `codex plugin
+# marketplace upgrade` delivers prebuilt artifacts; installs never build.
 !dist/
 dist/*.tsbuildinfo
-plugins/antigravity-mcp-bridge/dist/
+plugins/antigravity-mcp-bridge/dist/*.tsbuildinfo
 coverage/
 *.log
 .env

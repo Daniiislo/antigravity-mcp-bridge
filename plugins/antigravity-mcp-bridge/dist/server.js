@@ -1,0 +1,373 @@
+import * as z from "zod/v4";
+import { TaskAwareServer } from "./task-aware-server.js";
+const roleSchema = z.enum(["implementer", "tester"]);
+const optionalRoleSchema = roleSchema.optional().describe("Omit to target both roles");
+const jobStatusSchema = z.enum(["queued", "running", "succeeded", "failed", "canceled", "orphaned"]);
+function success(data, summary) {
+    const structuredContent = JSON.parse(JSON.stringify(data));
+    return { content: [{ type: "text", text: summary }], structuredContent };
+}
+function failure(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+        content: [{ type: "text", text: message }],
+        structuredContent: { error: message },
+        isError: true
+    };
+}
+export function createServer(manager) {
+    const server = new TaskAwareServer({ name: "antigravity-mcp-bridge", version: "0.1.0" }, manager);
+    // --- Controller Tools ---
+    server.registerTool("runtime_info", {
+        description: "Read build identity, live execution limits, and this server's usage protocol once at session start or after any restart. Values come from the running build, not external docs. Diagnostic only; do not poll.",
+        inputSchema: z.object({})
+    }, () => success({ ...manager.getRuntimeInfo(), instructions: manager.serverInstructions() }, "Bridge runtime identity, limits, and usage protocol."));
+    server.registerTool("list_models", {
+        title: "List Antigravity Models",
+        description: "List supported Antigravity models with cache metadata.",
+        inputSchema: z.object({
+            refresh: z.boolean().optional().describe("Bypass cache and query agy CLI directly")
+        })
+    }, async ({ refresh }) => {
+        try {
+            const result = await manager.listModels({ refresh });
+            return success(result, `Found ${result.models.length} models (cached=${result.cached}).`);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    server.registerTool("create_worker", {
+        title: "Create Antigravity Worker",
+        description: "Create an isolated Antigravity worker process with role, workspace, and optional constraints.",
+        inputSchema: z.object({
+            role: roleSchema.describe("Implementer starts in accept-edits mode; tester starts in plan mode"),
+            workspace: z.string().min(1).describe("Workspace directory inside AGY_ALLOWED_ROOTS"),
+            required_tools: z.array(z.string().min(1).max(64)).max(16).optional().describe("Task-specific executable names to preflight without launching AGY; module/package availability still needs native verification"),
+            model: z.string().optional().describe("Optional model override"),
+            effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional().describe("Optional effort override"),
+            constraints: z.string().optional().describe("Optional constraints prepended to all tasks for this worker")
+        })
+    }, async ({ role, workspace, required_tools, model, effort, constraints }) => {
+        try {
+            const result = await manager.createWorker({ role, workspace, requiredTools: required_tools, model, effort, constraints });
+            return success(result, `Created worker ${result.workerId} (${result.role}) in ${result.workspace}.`);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    server.registerTool("dispatch_task", {
+        title: "Dispatch Task",
+        description: "Enqueue a bounded task on a worker. One coherent workstream per dispatch — size the brief to finish within the total deadline (default from runtime_info), counting first-read exploration on a fresh conversation; split multi-part batches into separate dispatches on the same worker. Pin model/effort only with IDs list_models printed. Use a tester worker for review/verification and an implementer worker only for edits. Returns an MCP Task when negotiated, otherwise a job ID immediately.",
+        inputSchema: z.object({
+            worker_id: z.string().min(1).describe("Target worker ID"),
+            brief: z.string().min(1).describe("Task brief to enqueue"),
+            request_key: z.string().min(1).max(128).optional().describe("Stable retry key; reuse with exactly the same task/options to avoid duplicate work"),
+            total_duration_seconds: z.number().positive().max(86_400).optional().describe("Deadline from dispatch including queue time; defaults to the effective maximum duration. Near the deadline the worker is asked to wrap up and hand off"),
+            timeout_seconds: z.number().positive().max(86_400).optional()
+                .describe("Deprecated alias for inactivity_timeout_seconds"),
+            inactivity_timeout_seconds: z.number().positive().max(86_400).optional()
+                .describe("Time without a meaningful progress event before termination; raise it for workers generating one large quiet output"),
+            max_duration_seconds: z.number().positive().max(86_400).optional()
+                .describe("Absolute wall-clock safety cap even while progress continues")
+        })
+    }, async ({ worker_id, brief, request_key, total_duration_seconds, timeout_seconds, inactivity_timeout_seconds, max_duration_seconds }) => {
+        try {
+            if (timeout_seconds !== undefined && inactivity_timeout_seconds !== undefined) {
+                throw new Error("Use either timeout_seconds or inactivity_timeout_seconds, not both");
+            }
+            const result = await manager.dispatchTask(worker_id, brief, inactivity_timeout_seconds ?? timeout_seconds, max_duration_seconds, { requestKey: request_key, totalDurationSeconds: total_duration_seconds });
+            const summary = result.warnings && result.warnings.length > 0
+                ? `Dispatched task ${result.jobId} to ${result.role} worker ${result.workerId} (status: ${result.status}). WARNING: ${result.warnings.join(" ")}`
+                : `Dispatched task ${result.jobId} to ${result.role} worker ${result.workerId} (status: ${result.status}).`;
+            return success(result, summary);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    server.registerTool("wait_task", {
+        title: "Wait on Task",
+        description: "Wait in one pending call until the task reaches a terminal state, then return its compact result — the only normal completion evidence. Do not poll status/events and do not call inspect_task afterward on success. Host MCP tool timeout must exceed the job's total deadline.",
+        inputSchema: z.object({
+            job_id: z.string().min(1).describe("Job ID to wait for")
+        })
+    }, async ({ job_id }, context) => {
+        try {
+            const result = await manager.waitTaskUntilTerminal(job_id, { signal: context.mcpReq.signal });
+            const summary = `Job ${result.job_id} finished with status ${result.status}. Compact result included; do not call inspect_task unless diagnostics are needed.`;
+            return success(result, summary);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    server.registerTool("send_followup", {
+        title: "Send Followup",
+        description: "Enqueue related work in the same worker conversation and return immediately.",
+        inputSchema: z.object({
+            worker_id: z.string().min(1).describe("Target worker ID"),
+            finding: z.string().min(1).describe("Follow-up finding or task in the existing conversation"),
+            request_key: z.string().min(1).max(128).optional().describe("Stable key for retries of this follow-up; use a new key for new work"),
+            total_duration_seconds: z.number().positive().max(86_400).optional().describe("Deadline including queue time"),
+            timeout_seconds: z.number().positive().max(86_400).optional()
+                .describe("Deprecated alias for inactivity_timeout_seconds"),
+            inactivity_timeout_seconds: z.number().positive().max(86_400).optional()
+                .describe("Time without a meaningful progress event before termination"),
+            max_duration_seconds: z.number().positive().max(86_400).optional()
+                .describe("Absolute wall-clock safety cap even while progress continues")
+        })
+    }, async ({ worker_id, finding, request_key, total_duration_seconds, timeout_seconds, inactivity_timeout_seconds, max_duration_seconds }) => {
+        try {
+            if (timeout_seconds !== undefined && inactivity_timeout_seconds !== undefined) {
+                throw new Error("Use either timeout_seconds or inactivity_timeout_seconds, not both");
+            }
+            const result = await manager.sendFollowup(worker_id, finding, inactivity_timeout_seconds ?? timeout_seconds, max_duration_seconds, { requestKey: request_key, totalDurationSeconds: total_duration_seconds });
+            return success(result, `Enqueued follow-up ${result.jobId} on worker ${result.workerId}.`);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    server.registerTool("inspect_task", {
+        title: "Inspect Task",
+        description: "Inspect a compact terminal result. Prompt and step diagnostics are opt-in to conserve caller tokens.",
+        inputSchema: z.object({
+            job_id: z.string().min(1).describe("Job ID to inspect"),
+            include_prompt: z.boolean().optional().describe("Include bounded brief and effective prompt (default false)"),
+            include_steps: z.boolean().optional().describe("Include bounded step diagnostics (default false)"),
+            step_offset: z.number().int().min(0).optional().describe("0-based offset into step events (default 0)"),
+            step_limit: z.number().int().min(1).max(100).optional().describe("Maximum step events to return (default 20, max 100)")
+        })
+    }, async ({ job_id, include_prompt, include_steps, step_offset, step_limit }) => {
+        try {
+            const result = manager.inspectTask(job_id, { includePrompt: include_prompt, includeSteps: include_steps, stepOffset: step_offset, stepLimit: step_limit });
+            const stepsNote = result.step_events
+                ? ` (${result.step_events.length}/${result.total_steps} diagnostic steps shown)`
+                : "";
+            return success(result, `Inspected job ${result.job_id}: status ${result.status}${stepsNote}.`);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    server.registerTool("cancel_task", {
+        title: "Cancel Task",
+        description: "Cancel a task. Canceling an active task terminates the worker and resets its conversation. If the task is already terminal, returns its current status without mutating.",
+        inputSchema: z.object({
+            job_id: z.string().min(1).describe("Job ID to cancel")
+        })
+    }, async ({ job_id }) => {
+        try {
+            const result = await manager.cancelTask(job_id);
+            const summary = result.status === "canceled"
+                ? `Job ${result.jobId} canceled (active=${result.active}).`
+                : `Job ${result.jobId} was already terminal with status ${result.status} (active=false).`;
+            return success(result, summary);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    server.registerTool("close_worker", {
+        title: "Close Worker",
+        description: "Cancel all outstanding work, stop the process, and close the worker.",
+        inputSchema: z.object({
+            worker_id: z.string().min(1).describe("Worker ID to close")
+        })
+    }, async ({ worker_id }) => {
+        try {
+            const result = await manager.closeWorker(worker_id);
+            return success(result, `Closed worker ${result.workerId}.`);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    server.registerTool("agy_events", {
+        title: "Poll Antigravity Events",
+        description: "Human and diagnostic tool only. Poll normalized events with cursor, worker, and job filtering. Never call merely because time elapsed during a running job.",
+        inputSchema: z.object({
+            worker_id: z.string().optional().describe("Filter events by worker ID"),
+            job_id: z.string().optional().describe("Filter events by job ID"),
+            after_cursor: z.number().int().min(0).optional().describe("Filter events with cursor > after_cursor"),
+            limit: z.number().int().min(1).max(500).optional().describe("Maximum events to return (default 50)")
+        })
+    }, ({ worker_id, job_id, after_cursor, limit }) => {
+        try {
+            const result = manager.getEvents({ workerId: worker_id, jobId: job_id, afterCursor: after_cursor, limit });
+            return success(result, `Retrieved ${result.events.length} events (latest cursor: ${result.latest_cursor}).`);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    server.registerTool("agy_history", {
+        title: "Antigravity Task History",
+        description: "List newest jobs with terminal summaries across the server lifetime and restarts.",
+        inputSchema: z.object({
+            worker_id: z.string().optional().describe("Filter history by worker ID"),
+            status: jobStatusSchema.optional().describe("Filter history by job status"),
+            limit: z.number().int().min(1).max(100).optional().describe("Maximum jobs to return (default 20)")
+        })
+    }, async ({ worker_id, status, limit }) => {
+        try {
+            const result = await manager.getHistory({ workerId: worker_id, status, limit });
+            return success(result, `Retrieved ${result.jobs.length} jobs in history.`);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    server.registerTool("delete_task", {
+        title: "Delete Task History",
+        description: "Delete a completed task run and its event history from disk. Fails if the task is currently active (queued or running).",
+        inputSchema: z.object({
+            job_id: z.string().min(1).describe("Job ID of the finished task to delete")
+        })
+    }, async ({ job_id }) => {
+        try {
+            const result = await manager.deleteJob(job_id);
+            return success(result, `Deleted task ${result.jobId} from history.`);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    server.registerTool("clean_history", {
+        title: "Clean Task History",
+        description: "Prune or clean historical task runs by workspace/project, status, age, or keeping the newest N runs. Active tasks are automatically protected.",
+        inputSchema: z.object({
+            job_id: z.string().optional().describe("Clean a specific job ID"),
+            workspace: z.string().optional().describe("Filter cleanup to a specific workspace directory or project name"),
+            terminal_only: z.boolean().optional().describe("If true, only deletes completed jobs (succeeded, failed, canceled). Defaults to true if neither status nor all are specified."),
+            status: z.union([jobStatusSchema, z.array(jobStatusSchema)]).optional().describe("Filter cleanup to specific statuses (e.g. failed, canceled)"),
+            older_than_days: z.number().min(0).optional().describe("Only clean tasks older than this many days"),
+            keep: z.number().int().min(0).optional().describe("Preserve the newest N tasks matching the criteria"),
+            all: z.boolean().optional().describe("If true, deletes all historical tasks matching filters without requiring terminal_only")
+        })
+    }, async ({ job_id, workspace, terminal_only, status, older_than_days, keep, all }) => {
+        try {
+            const isTerminalOnly = terminal_only !== undefined ? terminal_only : (all ? false : true);
+            const result = await manager.cleanJobs({
+                jobId: job_id,
+                workspace,
+                terminalOnly: isTerminalOnly,
+                status: status,
+                olderThanDays: older_than_days,
+                keep
+            });
+            return success(result, `Cleaned ${result.deletedCount} tasks from history.`);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    server.registerTool("open_dashboard", {
+        title: "Open Antigravity Dashboard",
+        description: "Get the local dashboard URL to inspect workers, jobs, conversations, and events.",
+        inputSchema: z.object({
+            worker_id: z.string().optional().describe("Optional worker ID to filter the dashboard"),
+            job_id: z.string().optional().describe("Optional job ID to focus on in the dashboard"),
+            workspace: z.string().optional().describe("Optional workspace path or project name to filter the dashboard")
+        })
+    }, async ({ worker_id, job_id, workspace }) => {
+        try {
+            const dashboardUrl = await manager.getDashboardUrl({ workerId: worker_id, jobId: job_id, workspace });
+            if (!dashboardUrl) {
+                throw new Error("Dashboard is disabled via configuration (AGY_DASHBOARD_ENABLED=false)");
+            }
+            const structuredContent = {
+                dashboard_url: dashboardUrl,
+                read_only: true,
+                ...(worker_id ? { worker_id } : {}),
+                ...(job_id ? { job_id } : {}),
+                ...(workspace ? { workspace } : {})
+            };
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: `Antigravity dashboard available at ${dashboardUrl} (read-only).`
+                    },
+                    {
+                        type: "resource_link",
+                        uri: dashboardUrl,
+                        name: "antigravity-dashboard",
+                        title: "Antigravity Dashboard"
+                    }
+                ],
+                structuredContent
+            };
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    // --- Compatibility Tools ---
+    server.registerTool("agy_delegate", {
+        title: "Delegate to Antigravity",
+        description: "Send one bounded task to a persistent Antigravity implementer or tester conversation.",
+        inputSchema: z.object({
+            role: roleSchema.describe("Implementer may edit; tester is started in plan mode"),
+            task: z.string().min(1).describe("Decision-complete task or review brief"),
+            cwd: z.string().min(1).describe("Existing workspace directory inside AGY_ALLOWED_ROOTS"),
+            timeoutSeconds: z.number().positive().max(86_400).optional()
+                .describe("Inactivity timeout in seconds"),
+            maxDurationSeconds: z.number().positive().max(86_400).optional()
+                .describe("Absolute wall-clock safety cap in seconds")
+        })
+    }, async ({ role, task, cwd, timeoutSeconds, maxDurationSeconds }) => {
+        try {
+            const result = await manager.delegate(role, task, cwd, timeoutSeconds, maxDurationSeconds);
+            return success(result, result.response);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    server.registerTool("agy_status", {
+        title: "Antigravity worker status",
+        description: "Inspect compact legacy worker status. Stderr diagnostics are opt-in and bounded.",
+        inputSchema: z.object({
+            role: optionalRoleSchema,
+            include_diagnostics: z.boolean().optional().describe("Include at most 2048 characters of recent stderr per worker (default false)")
+        })
+    }, ({ role, include_diagnostics }) => {
+        const statuses = manager.status(role);
+        const workers = statuses.map(({ recentStderr, ...status }) => ({
+            ...status,
+            ...(include_diagnostics && recentStderr ? { recentStderr: recentStderr.slice(-2_048) } : {})
+        }));
+        return success({ workers }, `${workers.length} legacy worker status record(s).`);
+    });
+    server.registerTool("agy_stop", {
+        title: "Stop Antigravity workers",
+        description: "Stop one role or both while retaining in-memory status metadata.",
+        inputSchema: z.object({ role: optionalRoleSchema })
+    }, async ({ role }) => {
+        try {
+            await manager.stop(role);
+            return success({ stopped: role ?? "all" }, `Stopped ${role ?? "all Antigravity workers"}.`);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    server.registerTool("agy_reset", {
+        title: "Reset Antigravity conversations",
+        description: "Stop and forget one role or both. The next delegation starts a fresh conversation.",
+        inputSchema: z.object({ role: optionalRoleSchema })
+    }, async ({ role }) => {
+        try {
+            await manager.reset(role);
+            return success({ reset: role ?? "all" }, `Reset ${role ?? "all Antigravity workers"}.`);
+        }
+        catch (error) {
+            return failure(error);
+        }
+    });
+    return server;
+}
+//# sourceMappingURL=server.js.map

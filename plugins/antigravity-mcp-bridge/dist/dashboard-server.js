@@ -1,0 +1,514 @@
+import http from "node:http";
+import crypto from "node:crypto";
+import { existsSync, readdirSync } from "node:fs";
+import { getDashboardHtml } from "./dashboard-assets.js";
+export const DASHBOARD_SECURITY_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none';",
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "no-store, no-cache, must-revalidate, private",
+    "Pragma": "no-cache",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin"
+};
+export class DashboardServer {
+    server;
+    configuredPort;
+    actualPort;
+    enabled;
+    token;
+    manager;
+    eventStore;
+    runsDir;
+    startPromise;
+    activeSockets = new Set();
+    sseClients = new Set();
+    constructor(options) {
+        this.manager = options.manager;
+        this.eventStore = options.eventStore;
+        this.runsDir = options.runsDir;
+        this.configuredPort = options.port ?? 0;
+        this.enabled = options.enabled ?? true;
+        this.token = options.token || crypto.randomBytes(24).toString("hex");
+    }
+    get isRunning() {
+        return this.server !== undefined && this.actualPort !== undefined;
+    }
+    getPort() {
+        return this.actualPort;
+    }
+    getBaseUrl() {
+        if (!this.actualPort) {
+            throw new Error("Dashboard server is not listening");
+        }
+        return `http://127.0.0.1:${this.actualPort}/${this.token}/`;
+    }
+    async getUrl(options) {
+        if (!this.enabled) {
+            throw new Error("Dashboard is disabled via AGY_DASHBOARD_ENABLED=false");
+        }
+        const base = await this.start();
+        const params = new URLSearchParams();
+        if (options?.workerId)
+            params.set("worker_id", options.workerId);
+        if (options?.jobId)
+            params.set("job_id", options.jobId);
+        if (options?.workspace)
+            params.set("workspace", options.workspace);
+        const q = params.toString();
+        return q ? `${base}?${q}` : base;
+    }
+    async start() {
+        if (!this.enabled) {
+            throw new Error("Dashboard is disabled via AGY_DASHBOARD_ENABLED=false");
+        }
+        if (this.server && this.actualPort) {
+            return this.getBaseUrl();
+        }
+        if (this.startPromise) {
+            return this.startPromise;
+        }
+        this.startPromise = new Promise((resolve, reject) => {
+            const server = http.createServer((req, res) => {
+                this.handleRequest(req, res);
+            });
+            server.on("connection", (socket) => {
+                this.activeSockets.add(socket);
+                socket.on("close", () => {
+                    this.activeSockets.delete(socket);
+                });
+            });
+            server.on("error", (err) => {
+                this.startPromise = undefined;
+                reject(err);
+            });
+            // Bind strictly to 127.0.0.1 loopback
+            server.listen(this.configuredPort, "127.0.0.1", () => {
+                const addr = server.address();
+                if (typeof addr === "object" && addr) {
+                    this.actualPort = addr.port;
+                }
+                else {
+                    this.actualPort = this.configuredPort;
+                }
+                this.server = server;
+                // Invariant: Do not expose the token in logs
+                console.error(`[antigravity-mcp-bridge] dashboard server listening on 127.0.0.1:${this.actualPort}`);
+                resolve(this.getBaseUrl());
+            });
+        });
+        return this.startPromise;
+    }
+    async stop() {
+        for (const res of this.sseClients) {
+            try {
+                res.end();
+            }
+            catch {
+                // ignore
+            }
+        }
+        this.sseClients.clear();
+        for (const socket of this.activeSockets) {
+            try {
+                socket.destroy();
+            }
+            catch {
+                // ignore
+            }
+        }
+        this.activeSockets.clear();
+        if (this.server) {
+            const s = this.server;
+            this.server = undefined;
+            this.actualPort = undefined;
+            this.startPromise = undefined;
+            await new Promise((resolve) => {
+                s.close(() => resolve());
+            });
+        }
+    }
+    sendJsonError(res, status, message, headers = {}) {
+        res.writeHead(status, {
+            "Content-Type": "application/json; charset=utf-8",
+            ...DASHBOARD_SECURITY_HEADERS,
+            ...headers
+        });
+        res.end(JSON.stringify({ error: message }));
+    }
+    sendJson(res, status, data) {
+        res.writeHead(status, {
+            "Content-Type": "application/json; charset=utf-8",
+            ...DASHBOARD_SECURITY_HEADERS
+        });
+        res.end(JSON.stringify(data));
+    }
+    async handleRequest(req, res) {
+        // 1. Loopback remote peer validation
+        const remote = req.socket.remoteAddress;
+        const isLoopback = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
+        if (!isLoopback) {
+            this.sendJsonError(res, 403, "Forbidden: loopback access only");
+            return;
+        }
+        // 2. Host header validation to prevent DNS rebinding attacks
+        const host = req.headers.host;
+        if (!host) {
+            this.sendJsonError(res, 400, "Missing Host header");
+            return;
+        }
+        let hostname = host;
+        let portFromHost;
+        if (host.startsWith("[")) {
+            const endBracket = host.indexOf("]");
+            if (endBracket !== -1) {
+                hostname = host.slice(0, endBracket + 1);
+                if (host[endBracket + 1] === ":") {
+                    portFromHost = host.slice(endBracket + 2);
+                }
+            }
+        }
+        else if (host.includes(":")) {
+            const parts = host.split(":");
+            hostname = parts[0];
+            portFromHost = parts[1];
+        }
+        const validHostnames = ["127.0.0.1", "localhost", "[::1]"];
+        if (!validHostnames.includes(hostname.toLowerCase())) {
+            this.sendJsonError(res, 400, "Invalid Host header");
+            return;
+        }
+        if (portFromHost && Number(portFromHost) !== this.actualPort) {
+            this.sendJsonError(res, 400, "Invalid Host header port");
+            return;
+        }
+        // 3. Method validation
+        const allowedMethods = ["GET", "HEAD", "POST", "DELETE"];
+        if (!allowedMethods.includes(req.method || "")) {
+            if (typeof req.resume === "function")
+                req.resume();
+            this.sendJsonError(res, 405, "Method not allowed", { "Allow": "GET, HEAD, POST, DELETE" });
+            return;
+        }
+        // 4. URL and Token validation
+        let parsedUrl;
+        try {
+            parsedUrl = new URL(req.url || "/", `http://127.0.0.1:${this.actualPort}`);
+        }
+        catch {
+            this.sendJsonError(res, 400, "Malformed URL");
+            return;
+        }
+        const pathname = parsedUrl.pathname;
+        const tokenPrefix = `/${this.token}`;
+        if (!pathname.startsWith(tokenPrefix)) {
+            this.sendJsonError(res, 401, "Unauthorized: invalid or missing token");
+            return;
+        }
+        const subpath = pathname.slice(tokenPrefix.length);
+        if (subpath !== "" && !subpath.startsWith("/")) {
+            this.sendJsonError(res, 401, "Unauthorized: invalid or missing token");
+            return;
+        }
+        // 5. Route handling
+        try {
+            // DELETE routes
+            if (req.method === "DELETE") {
+                if (subpath.startsWith("/api/jobs/")) {
+                    const jobId = subpath.slice("/api/jobs/".length);
+                    await this.handleDeleteJob(res, jobId);
+                    return;
+                }
+                this.sendJsonError(res, 405, "Method not allowed", { "Allow": "GET, HEAD" });
+                return;
+            }
+            // POST routes
+            if (req.method === "POST") {
+                if (subpath === "/api/clean") {
+                    await this.handleClean(req, res);
+                    return;
+                }
+                this.sendJsonError(res, 405, "Method not allowed", { "Allow": "GET, HEAD" });
+                return;
+            }
+            // GET and HEAD routes
+            if (subpath === "/api/clean") {
+                this.sendJsonError(res, 405, "Method not allowed", { "Allow": "POST" });
+                return;
+            }
+            if (subpath === "" || subpath === "/") {
+                // Dashboard HTML
+                res.writeHead(200, {
+                    "Content-Type": "text/html; charset=utf-8",
+                    ...DASHBOARD_SECURITY_HEADERS
+                });
+                if (req.method === "HEAD") {
+                    res.end();
+                    return;
+                }
+                res.end(getDashboardHtml(this.token));
+                return;
+            }
+            if (subpath === "/api/snapshot") {
+                this.handleSnapshot(res);
+                return;
+            }
+            if (subpath.startsWith("/api/jobs/")) {
+                const jobId = subpath.slice("/api/jobs/".length);
+                this.handleJobDetail(res, jobId);
+                return;
+            }
+            if (subpath === "/api/events") {
+                this.handleEvents(res, parsedUrl);
+                return;
+            }
+            if (subpath === "/api/stream") {
+                this.handleStream(req, res, parsedUrl);
+                return;
+            }
+            this.sendJsonError(res, 404, "Not found");
+        }
+        catch (err) {
+            // JSON errors, no stacks exposed
+            const msg = err instanceof Error ? err.message : "Internal server error";
+            this.sendJsonError(res, 500, msg);
+        }
+    }
+    async handleSnapshot(res) {
+        try {
+            const explicitWorkers = this.manager.getExplicitWorkersList();
+            const history = await this.manager.getHistory({ limit: 100 });
+            const eventsRes = this.eventStore.getEvents({ limit: 1 });
+            const fallbackDirs = this.manager.getFallbackRunsDirs ? this.manager.getFallbackRunsDirs() : [];
+            let totalJobFileCount = existsSync(this.runsDir)
+                ? readdirSync(this.runsDir).filter((name) => name.endsWith(".ndjson")).length
+                : 0;
+            for (const fb of fallbackDirs) {
+                if (existsSync(fb)) {
+                    totalJobFileCount += readdirSync(fb).filter((name) => name.endsWith(".ndjson")).length;
+                }
+            }
+            const snapshot = {
+                workers: explicitWorkers,
+                jobs: history.jobs,
+                history_store: {
+                    directory: this.runsDir,
+                    directory_exists: existsSync(this.runsDir),
+                    fallback_directories: fallbackDirs.filter(existsSync),
+                    job_file_count: totalJobFileCount
+                },
+                latest_cursor: eventsRes.latest_cursor
+            };
+            this.sendJson(res, 200, snapshot);
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : "Failed to load snapshot";
+            this.sendJsonError(res, 500, msg);
+        }
+    }
+    handleJobDetail(res, jobId) {
+        if (!jobId || !/^[a-zA-Z0-9_\-\.]+$/.test(jobId)) {
+            this.sendJsonError(res, 400, "Invalid job ID");
+            return;
+        }
+        const job = this.manager.getJobDetail(jobId);
+        if (!job) {
+            this.sendJsonError(res, 404, "Job not found");
+            return;
+        }
+        this.sendJson(res, 200, job);
+    }
+    async handleDeleteJob(res, rawJobId) {
+        let jobId;
+        try {
+            jobId = decodeURIComponent(rawJobId);
+        }
+        catch {
+            this.sendJsonError(res, 400, "Invalid job ID");
+            return;
+        }
+        if (!jobId || !/^[a-zA-Z0-9_-]+$/.test(jobId)) {
+            this.sendJsonError(res, 400, "Invalid job ID");
+            return;
+        }
+        try {
+            const result = await this.manager.deleteJob(jobId);
+            if (!result.success) {
+                this.sendJsonError(res, 404, "Job not found");
+                return;
+            }
+            this.sendJson(res, 200, { success: true, jobId, job_id: jobId });
+        }
+        catch (err) {
+            this.sendJsonError(res, 400, err instanceof Error ? err.message : String(err));
+        }
+    }
+    async handleClean(req, res) {
+        try {
+            const body = await this.readJsonBody(req);
+            const result = await this.manager.cleanJobs({
+                all: Boolean(body.all),
+                jobId: typeof body.jobId === "string" ? body.jobId : (typeof body.job_id === "string" ? body.job_id : undefined),
+                workspace: typeof body.workspace === "string" ? body.workspace : undefined,
+                status: Array.isArray(body.status) || typeof body.status === "string" ? body.status : undefined,
+                terminalOnly: body.terminalOnly !== undefined ? Boolean(body.terminalOnly) : (body.terminal_only !== undefined ? Boolean(body.terminal_only) : false),
+                olderThanDays: typeof body.olderThanDays === "number" ? body.olderThanDays : (typeof body.older_than_days === "number" ? body.older_than_days : undefined),
+                keep: typeof body.keep === "number" ? body.keep : undefined
+            });
+            this.sendJson(res, 200, {
+                success: true,
+                deleted_count: result.deletedCount,
+                deletedCount: result.deletedCount,
+                deleted_jobs: result.deletedJobIds,
+                deletedJobIds: result.deletedJobIds
+            });
+        }
+        catch (err) {
+            this.sendJsonError(res, 400, err instanceof Error ? err.message : String(err));
+        }
+    }
+    async readJsonBody(req, maxBytes = 32_768) {
+        return new Promise((resolve, reject) => {
+            let body = "";
+            let bytes = 0;
+            req.on("data", (chunk) => {
+                bytes += chunk.length;
+                if (bytes > maxBytes) {
+                    reject(new Error("Request body too large"));
+                    req.destroy();
+                    return;
+                }
+                body += chunk.toString("utf8");
+            });
+            req.on("end", () => {
+                if (!body.trim()) {
+                    resolve({});
+                    return;
+                }
+                try {
+                    resolve(JSON.parse(body));
+                }
+                catch {
+                    reject(new Error("Invalid JSON in request body"));
+                }
+            });
+            req.on("error", (err) => reject(err));
+        });
+    }
+    handleEvents(res, parsedUrl) {
+        const rawAfter = parsedUrl.searchParams.get("after");
+        let afterCursor;
+        if (rawAfter !== null && rawAfter !== "") {
+            const parsed = Number(rawAfter);
+            if (!Number.isInteger(parsed) || parsed < 0) {
+                this.sendJsonError(res, 400, "Invalid after cursor (must be a non-negative integer)");
+                return;
+            }
+            afterCursor = parsed;
+        }
+        const rawLimit = parsedUrl.searchParams.get("limit");
+        let limit;
+        if (rawLimit !== null && rawLimit !== "") {
+            const parsed = Number(rawLimit);
+            if (!Number.isInteger(parsed) || parsed < 1 || parsed > 500) {
+                this.sendJsonError(res, 400, "Invalid limit (must be an integer between 1 and 500)");
+                return;
+            }
+            limit = parsed;
+        }
+        const workerId = parsedUrl.searchParams.get("worker_id") || undefined;
+        if (workerId && !/^[a-zA-Z0-9_\-\.]+$/.test(workerId)) {
+            this.sendJsonError(res, 400, "Invalid worker_id");
+            return;
+        }
+        const jobId = parsedUrl.searchParams.get("job_id") || undefined;
+        if (jobId && !/^[a-zA-Z0-9_\-\.]+$/.test(jobId)) {
+            this.sendJsonError(res, 400, "Invalid job_id");
+            return;
+        }
+        const result = this.manager.getEvents({
+            workerId,
+            jobId,
+            afterCursor,
+            limit
+        });
+        this.sendJson(res, 200, result);
+    }
+    handleStream(req, res, parsedUrl) {
+        const headerLastId = Array.isArray(req.headers["last-event-id"])
+            ? req.headers["last-event-id"][0]
+            : req.headers["last-event-id"];
+        const rawAfter = parsedUrl.searchParams.get("after") ?? headerLastId;
+        let afterCursor;
+        if (rawAfter !== null && rawAfter !== undefined && rawAfter !== "") {
+            const parsed = Number(rawAfter);
+            if (!Number.isInteger(parsed) || parsed < 0) {
+                this.sendJsonError(res, 400, "Invalid after cursor");
+                return;
+            }
+            afterCursor = parsed;
+        }
+        const workerId = parsedUrl.searchParams.get("worker_id") || undefined;
+        if (workerId && !/^[a-zA-Z0-9_\-\.]+$/.test(workerId)) {
+            this.sendJsonError(res, 400, "Invalid worker_id");
+            return;
+        }
+        const jobId = parsedUrl.searchParams.get("job_id") || undefined;
+        if (jobId && !/^[a-zA-Z0-9_\-\.]+$/.test(jobId)) {
+            this.sendJsonError(res, 400, "Invalid job_id");
+            return;
+        }
+        res.writeHead(200, {
+            ...DASHBOARD_SECURITY_HEADERS,
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache, no-transform, no-store, private",
+            "Connection": "keep-alive"
+        });
+        this.sseClients.add(res);
+        let lastSentCursor = afterCursor ?? 0;
+        // Send catch-up events if requested
+        if (afterCursor !== undefined && afterCursor >= 0) {
+            const pastEvents = this.eventStore.getEvents({
+                workerId,
+                jobId,
+                afterCursor: lastSentCursor,
+                limit: 500
+            });
+            for (const evt of pastEvents.events) {
+                if (evt.cursor > lastSentCursor) {
+                    lastSentCursor = evt.cursor;
+                    res.write(`id: ${evt.cursor}\nevent: event\ndata: ${JSON.stringify(evt)}\n\n`);
+                }
+            }
+        }
+        // Invariant: Prevent duplicate reconnect delivery by filtering on lastSentCursor
+        const onEvent = (evt) => {
+            if (workerId && evt.workerId !== workerId)
+                return;
+            if (jobId && evt.jobId !== jobId)
+                return;
+            if (evt.cursor <= lastSentCursor)
+                return;
+            lastSentCursor = evt.cursor;
+            res.write(`id: ${evt.cursor}\nevent: event\ndata: ${JSON.stringify(evt)}\n\n`);
+        };
+        this.eventStore.on("event", onEvent);
+        const pingTimer = setInterval(() => {
+            try {
+                res.write(": ping\n\n");
+            }
+            catch {
+                // ignore
+            }
+        }, 15_000);
+        pingTimer.unref?.();
+        res.write(": connected\n\n");
+        res.on("close", () => {
+            this.sseClients.delete(res);
+            this.eventStore.removeListener("event", onEvent);
+            clearInterval(pingTimer);
+        });
+    }
+}
+//# sourceMappingURL=dashboard-server.js.map

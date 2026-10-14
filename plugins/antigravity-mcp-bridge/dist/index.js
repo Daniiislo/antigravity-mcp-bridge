@@ -1,0 +1,31 @@
+#!/usr/bin/env node
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { loadConfig } from "./config.js";
+import { createServer } from "./server.js";
+import { WorkerManager } from "./worker-manager.js";
+async function main() {
+    const config = loadConfig();
+    const manager = new WorkerManager(config);
+    const handle = serveStdio(() => createServer(manager).server, {
+        onerror: (error) => console.error(`[antigravity-mcp-bridge] ${error.message}`)
+    });
+    let closing = false;
+    const shutdown = async () => {
+        if (closing)
+            return;
+        closing = true;
+        await manager.stop();
+        await handle.close();
+    };
+    process.once("SIGINT", () => { void shutdown().finally(() => process.exit(130)); });
+    process.once("SIGTERM", () => { void shutdown().finally(() => process.exit(143)); });
+    process.stdin.once("end", () => { void shutdown(); });
+    process.stdin.once("close", () => { void shutdown(); });
+    process.once("beforeExit", () => { void manager.stop(); });
+    console.error(`[antigravity-mcp-bridge] serving over stdio build=${manager.getRuntimeInfo().build_id} wait=terminal`);
+}
+main().catch((error) => {
+    console.error(`[antigravity-mcp-bridge] ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+});
+//# sourceMappingURL=index.js.map
