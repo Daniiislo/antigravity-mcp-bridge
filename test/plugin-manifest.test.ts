@@ -100,9 +100,15 @@ describe("Agent Plugins Manifests", () => {
     expect(existsSync(path.join(pluginDir, ".mcp.json"))).toBe(true);
     expect(existsSync(path.join(pluginDir, "dist", "index.js"))).toBe(true);
 
-    // Production dependencies are bundled (same pattern as OpenAI's bundled
-    // browser plugin) so installs never run npm.
-    for (const dep of ["@modelcontextprotocol/server", "@modelcontextprotocol/ext-tasks", "zod"]) {
+    // Production dependency closure is bundled (same pattern as OpenAI's
+    // bundled browser plugin) so installs never run npm — including transitive
+    // dependencies the server imports at runtime.
+    for (const dep of [
+      "@modelcontextprotocol/server",
+      "@modelcontextprotocol/ext-tasks",
+      "@modelcontextprotocol/core",
+      "zod"
+    ]) {
       expect(existsSync(path.join(pluginDir, "node_modules", dep))).toBe(true);
     }
 
