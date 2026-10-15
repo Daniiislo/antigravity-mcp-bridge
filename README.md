@@ -55,6 +55,19 @@ Workers can then run in any subdirectory of those roots. Until this file exists 
 
 Prefer env variables? Set `AGY_ALLOWED_ROOTS` in your MCP server entry instead (see below) — it overrides the file.
 
+### Optional: extra readable directories (`add_dirs`)
+
+Workers can read their workspace only. If they must read another directory outside it (a shared skills or docs folder, for example), add it to the same file:
+
+```jsonc
+{
+  "allowed_roots": ["<your-projects-dir>"],
+  "add_dirs": ["<your-skills-dir>"]   // absolute paths of existing directories
+}
+```
+
+Each entry is passed to every worker as an extra `--add-dir`. `AGY_ADD_DIRS` (paths separated like `AGY_ALLOWED_ROOTS`) overrides the file. Antigravity checks the literal path, so list the **real** path: a symlink or junction alias of an added directory is still denied. The effective list is reported by `runtime_info` as `add_dirs`.
+
 ## Update / Uninstall
 
 ```bash
@@ -96,6 +109,7 @@ Most installs need only `allowed_roots` (above). Everything else is optional and
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `AGY_ALLOWED_ROOTS` | config file → user home | Allowed workspace roots, `;`-separated (Windows) or `:` (macOS/Linux). |
+| `AGY_ADD_DIRS` | config file `add_dirs` → none | Extra directories workers may read (`--add-dir`), same separator rules. Real paths only. |
 | `AGY_BIN` | auto-discovered | `agy` executable name or path. |
 | `AGY_MAX_TURN_SECONDS` | `1800` | Absolute per-job wall-clock cap. |
 | `AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS` | `300` | Stop a worker after this long without progress. |

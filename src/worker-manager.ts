@@ -276,6 +276,7 @@ export class WorkerManager {
     const agyWorker = new AgyWorker({
       role: options.role,
       cwd: workspace,
+      ...(this.config.addDirs?.length ? { addDirs: this.config.addDirs } : {}),
       executable: this.config.executable,
       prefixArgs: this.prefixArgs,
       mode: options.role === "tester" ? "plan" : "accept-edits",
@@ -1066,6 +1067,7 @@ export class WorkerManager {
       worker = new AgyWorker({
         role,
         cwd: workspace,
+        ...(this.config.addDirs?.length ? { addDirs: this.config.addDirs } : {}),
         executable: this.config.executable,
         prefixArgs: this.prefixArgs,
         mode: role === "tester" ? "plan" : "accept-edits",

@@ -58,6 +58,15 @@ describe("AgyWorker", () => {
     expect(args[args.indexOf("--add-dir") + 1]).toBe(process.cwd());
   });
 
+  it("passes each configured add-dir as an extra --add-dir after the workspace", async () => {
+    const extra = mkdtempSync(path.join(tmpdir(), "agy-extra-"));
+    temporaryDirectories.push(extra);
+    const result = await createWorker("accept-edits", { addDirs: [extra, process.cwd()] }).delegate("ARGUMENTS");
+    const args = JSON.parse(result.response) as string[];
+    const dirs = args.flatMap((arg, index) => arg === "--add-dir" ? [args[index + 1]] : []);
+    expect(dirs).toEqual([process.cwd(), extra]);
+  });
+
   it("does not charge duplicate DONE usage twice", async () => {
     const worker = createWorker();
     const result = await worker.delegate("DUPLICATE_USAGE", { maxTokens: 5, maxSteps: 3 });

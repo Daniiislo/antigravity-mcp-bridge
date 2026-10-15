@@ -28,6 +28,8 @@ export type AgyWorkerRawEvent = {
 export interface AgyWorkerOptions {
     role: Role;
     cwd: string;
+    /** Extra directories passed as additional --add-dir flags. */
+    addDirs?: string[] | undefined;
     executable: string;
     prefixArgs?: string[] | undefined;
     mode: "accept-edits" | "plan";

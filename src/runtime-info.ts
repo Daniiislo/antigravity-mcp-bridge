@@ -16,6 +16,7 @@ export function runtimeInfo(config: BridgeConfig) {
     steps_budget: config.maxSteps ?? null,
     observed_token_budget: config.maxTurnTokens ?? null,
     allowed_roots: config.allowedRoots,
+    add_dirs: config.addDirs ?? [],
     tasks_capability_gated: true
   };
 }
