@@ -127,7 +127,7 @@ describe("Agent Plugins Manifests", () => {
 
     const claudeManifest = JSON.parse(readFileSync(path.join(pluginDir, ".claude-plugin", "plugin.json"), "utf8"));
     expect(claudeManifest.name).toBe("antigravity-mcp-bridge");
-    expect(claudeManifest.mcpServers).toBe("./.mcp.json");
+    expect(claudeManifest.mcpServers).toBe("./.mcp.claude.json");
 
     const mcp = JSON.parse(readFileSync(path.join(pluginDir, ".mcp.json"), "utf8"));
     const server = mcp.mcpServers["antigravity-bridge"];
@@ -140,6 +140,26 @@ describe("Agent Plugins Manifests", () => {
     expect(server.env?.AGY_ALLOWED_ROOTS).toBeUndefined();
     // The Codex host default (300 s) would cut wait_task short of the 1800 s job budget.
     expect(server.tool_timeout_sec).toBeGreaterThan(Number(server.env?.AGY_MAX_TURN_SECONDS ?? 1800));
+  });
+
+  it("Claude Code launches the plugin server by CLAUDE_PLUGIN_ROOT because its cwd is the user's project", () => {
+    const pluginDir = path.join(root, "plugins", "antigravity-mcp-bridge");
+    const claudeManifest = JSON.parse(readFileSync(path.join(pluginDir, ".claude-plugin", "plugin.json"), "utf8"));
+    expect(claudeManifest.mcpServers).toBe("./.mcp.claude.json");
+    const claudeServer = JSON.parse(readFileSync(path.join(pluginDir, ".mcp.claude.json"), "utf8")).mcpServers["antigravity-bridge"];
+    expect(claudeServer.command).toBe("node");
+    expect(claudeServer.args).toEqual(["${CLAUDE_PLUGIN_ROOT}/dist/index.js"]);
+    expect(claudeServer).not.toHaveProperty("cwd");
+    expect(claudeServer).not.toHaveProperty("tool_timeout_sec");
+    expect(existsSync(path.join(pluginDir, "dist", "index.js"))).toBe(true);
+
+    // Codex resolves the relative path against the plugin root and honors tool_timeout_sec.
+    const codexManifest = JSON.parse(readFileSync(path.join(pluginDir, ".codex-plugin", "plugin.json"), "utf8"));
+    expect(codexManifest.mcpServers).toBe("./.mcp.json");
+    const codexServer = JSON.parse(readFileSync(path.join(pluginDir, ".mcp.json"), "utf8")).mcpServers["antigravity-bridge"];
+    expect(codexServer.args).toEqual(["./dist/index.js"]);
+    expect(codexServer.tool_timeout_sec).toBeGreaterThanOrEqual(Number(codexServer.env.AGY_MAX_TURN_SECONDS));
+    expect(claudeServer.env).toEqual(codexServer.env);
   });
 
   it("marketplace.json is portable: relative plugin path, installable from any clone", () => {

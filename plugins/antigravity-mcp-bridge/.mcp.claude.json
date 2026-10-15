@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "antigravity-bridge": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/dist/index.js"
+      ],
+      "env": {
+        "AGY_BIN": "agy",
+        "AGY_MAX_TURN_SECONDS": "1800"
+      }
+    }
+  }
+}
