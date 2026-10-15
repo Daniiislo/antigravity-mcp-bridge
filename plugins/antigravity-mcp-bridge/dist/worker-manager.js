@@ -8,7 +8,10 @@ import { ModelCatalog } from "./model-catalog.js";
 import { DashboardServer } from "./dashboard-server.js";
 import { checkRequiredTools } from "./preflight.js";
 import { runtimeInfo } from "./runtime-info.js";
+import { hostWarnings } from "./host-check.js";
 import { addDeniedAction, buildJobWarnings, extractStderrHint, stderrDeniedPermission, stepDenial, summarizeToolActivity, withCommandTarget } from "./job-activity.js";
+/** Short bridge contract appended to every job prompt: fewer re-reads and a bounded handoff keep controller context small. */
+export const WORKER_RULES = "[Working rules] Read each needed file once, whole, before editing; do not re-read a file you just wrote unless an edit failed. Prefer targeted edits over rewrites. Run only the commands the task needs.\n[Handoff] End with a concise handoff (max ~1,200 characters): files changed, checks run with results, anything unfinished. Do not restate the task.";
 export class WorkerManager {
     config;
     prefixArgs;
@@ -17,6 +20,7 @@ export class WorkerManager {
     jobs = new Map();
     /** Jobs whose previous wait was aborted by the host while still running. */
     abortedWaits = new Set();
+    hostWarningsShown = false;
     requestHistory;
     eventStore;
     modelCatalog;
@@ -60,6 +64,19 @@ export class WorkerManager {
         return this.modelCatalog.listModels(options);
     }
     getRuntimeInfo() { return runtimeInfo(this.config); }
+    /** Read-only host configuration warnings for the connected client (empty for unknown hosts). */
+    getHostWarnings(clientName) {
+        return hostWarnings({ clientName, budgetSeconds: (this.config.maxTurnTimeoutMs ?? 1_800_000) / 1_000 });
+    }
+    /** Host warnings the first time only, so the first dispatch-like response carries them once per process. */
+    takeFirstCallHostWarnings(clientName) {
+        if (this.hostWarningsShown)
+            return [];
+        const warnings = this.getHostWarnings(clientName);
+        if (warnings.length > 0)
+            this.hostWarningsShown = true;
+        return warnings;
+    }
     /**
      * Usage protocol served to the host agent through the MCP initialize result.
      * Generated from live config so every bridge version teaches its own current
@@ -72,12 +89,12 @@ export class WorkerManager {
             "This server defines its own usage protocol; follow it instead of any remembered or externally documented procedure.",
             "",
             "WORKFLOW",
-            "1. list_models (refresh: true) before pinning any non-default model or effort on create_worker; pass only IDs that command printed. An invalid model fails the whole dispatch.",
-            "2. create_worker once per role (implementer edits; tester reviews by instruction: it is launched with --mode plan, which current agy ignores with slash commands disabled, so it is not an enforced read-only sandbox, and tester jobs that modify files get a warning). One worker per role is enough; resume it for related fixes.",
-            "3. dispatch_task with a decision-complete brief. One coherent workstream per dispatch: size the brief so it finishes within the deadline. A fresh conversation also spends time reading files before editing. A dispatch warning says the brief bundles multiple workstreams: split follow-ups into separate jobs on the same worker (its conversation persists, so context is not lost). Splitting costs nothing; a deadline kill costs the whole turn.",
-            "4. wait_task once per job; it stays pending until terminal. Never poll status or events while a wait is possible. Host tool timeout must exceed the job deadline.",
-            "5. Accept a terminal result only when: status succeeded, response non-empty, no denied actions, and required verification actually ran. A SUCCESS with an empty response or denied actions is failure.",
-            "6. inspect_task / agy_events only for failure diagnostics; not after a successful wait.",
+            "1. list_models (refresh: true) before pinning any non-default model or effort on create_worker; pass only IDs that command printed.",
+            "2. create_worker once per role (implementer edits; tester reviews by instruction only: --mode plan is ignored by current agy, so it is not a read-only sandbox). One worker per role; resume it for related work.",
+            "3. dispatch_task with a decision-complete brief and wait: true when you have nothing else to do meanwhile (one controller turn per job instead of two). Each job costs controller turns, so batch one coherent workstream per job instead of many micro-jobs; if a dispatch warning says the brief bundles workstreams, split it. Do not send follow-ups to a worker whose job is still running unless you intend to queue them.",
+            "4. Without wait: true, call wait_task once per job; it stays pending until terminal. Never poll status or events. Host tool timeout must exceed the job deadline.",
+            "5. Accept a terminal result only when status is succeeded, the response is non-empty, required verification actually ran, and every `warnings` entry was reviewed (denied actions, no file changed, tester edits). Check `tool_activity` (files_changed, commands_run) against the claimed work.",
+            "6. inspect_task / agy_events only for failure diagnostics, not after a successful wait.",
             "",
             `LIMITS (live from this build; do not assume other values)`,
             `- Allowed workspace roots: ${info.allowed_roots.join(path.delimiter)}. Workers may only run inside these; a rejected workspace names the fix.`,
@@ -87,15 +104,15 @@ export class WorkerManager {
             ...(info.observed_token_budget !== null ? [`- Observed token budget: ${info.observed_token_budget} per turn.`] : []),
             "",
             "FAILURE HANDLING",
-            "- max_duration timeout: the brief did not fit the deadline. Do NOT re-dispatch the same brief, and do not escalate timeouts on one brief. Resume the same worker with a small inventory-and-finish brief covering only the remaining delta; never rewrite completed files.",
-            "- inactivity timeout while progress shows an ACTIVE compose step: the turn was generating a large output quietly. Retry once with a higher inactivity_timeout_seconds instead of restarting from scratch.",
-            "- Service-side 503/eligibility errors: BLOCKED for that worker, not a retry signal. Report or switch model once; do not loop dispatches.",
-            "- ORPHANED_JOB (job stuck queued/running from a previous bridge session): its process is dead. Inspect the partial diff and dispatch a new bounded job under a new request key.",
-            "- Timeout preserves the worker conversation: check the workspace diff before writing any salvage brief.",
+            "- max_duration timeout: the brief did not fit. Do not re-dispatch it or escalate timeouts; resume the same worker with a small inventory-and-finish brief for the remaining delta only.",
+            "- inactivity timeout: retry on the SAME worker with a higher inactivity_timeout_seconds instead of creating a new worker or restarting from scratch.",
+            "- Service-side 503/eligibility errors: BLOCKED for that worker, not a retry signal. Report or switch model once; do not loop.",
+            "- ORPHANED_JOB (left over from a previous bridge session): its process is dead. Inspect the partial diff and dispatch a new bounded job under a new request key.",
+            "- A timeout preserves the worker conversation: check the workspace diff before writing any salvage brief.",
             "",
             "RECOVERY",
-            "- agy_history recovers job summaries after a bridge/MCP restart; inspect_task the persisted job for detail.",
-            "- cancel_task obsolete jobs (cancelling an active turn invalidates that conversation); close_worker when the checkpoint is accepted."
+            "- agy_history recovers job summaries after a restart; inspect_task the persisted job for detail.",
+            "- cancel_task obsolete jobs (cancelling an active turn resets that conversation); close_worker when the checkpoint is accepted."
         ].join("\n");
     }
     async createWorker(options) {
@@ -219,8 +236,9 @@ export class WorkerManager {
         const budgetInstruction = this.config.maxSteps || this.config.maxTurnTokens
             ? `[Budget]\n${this.config.maxSteps ?? "configured"} steps/${this.config.maxTurnTokens ?? "configured"} tokens max. Use one repo-native verification path; after one missing tool, report it. Reserve a concise final response.\n\n`
             : "";
-        const effectivePrompt = budgetInstruction || worker.constraints
-            ? `${budgetInstruction}${worker.constraints ? `[Constraints]\n${worker.constraints}\n\n` : ""}[Task]\n${brief}`
+        const rules = this.config.workerRules === false ? "" : `${WORKER_RULES}\n\n`;
+        const effectivePrompt = budgetInstruction || worker.constraints || rules
+            ? `${budgetInstruction}${worker.constraints ? `[Constraints]\n${worker.constraints}\n\n` : ""}${rules}[Task]\n${brief}`
             : brief;
         const totalMs = (options.totalDurationSeconds ?? effectiveMaxDurationSeconds ?? 600) * 1_000;
         const deadlineAt = new Date(Date.now() + totalMs).toISOString();

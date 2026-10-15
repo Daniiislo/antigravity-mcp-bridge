@@ -15,13 +15,59 @@ function failure(error) {
         isError: true
     };
 }
-export function createServer(manager) {
+/** Interval between MCP progress notifications while a wait is pending (keeps host idle timeouts from firing). */
+export const PROGRESS_KEEPALIVE_MS = 30_000;
+export function createServer(manager, options = {}) {
+    const progressIntervalMs = options.progressIntervalMs ?? PROGRESS_KEEPALIVE_MS;
     const server = new TaskAwareServer({ name: "antigravity-mcp-bridge", version: "0.1.0" }, manager);
+    const clientName = () => server.server.getClientVersion()?.name;
+    /** Host configuration warnings, appended once per process to the first dispatch-like response. */
+    const withHostWarnings = (summary) => {
+        const warnings = manager.takeFirstCallHostWarnings(clientName());
+        return warnings.length > 0 ? `${summary} HOST WARNING: ${warnings.join(" ")}` : summary;
+    };
+    /** Shared terminal wait for wait_task and dispatch/follow-up with wait: true. */
+    const waitForTerminal = async (jobId, context) => {
+        const repeated = manager.isRepeatedWait(jobId);
+        // Progress notifications only when the caller supplied a token (MCP spec); never part of the result.
+        const progressToken = context.mcpReq._meta?.progressToken;
+        let progress = 0;
+        const keepalive = progressToken === undefined ? undefined : setInterval(() => {
+            try {
+                progress += 1;
+                const live = manager.inspectTask(jobId);
+                const message = `${live.status}${live.last_progress ? `: ${live.last_progress}` : ""}`.slice(0, 160);
+                void context.mcpReq.notify({ method: "notifications/progress", params: { progressToken, progress, message } }).catch(() => undefined);
+            }
+            catch {
+                // A failed keepalive must never affect the wait.
+            }
+        }, progressIntervalMs);
+        keepalive?.unref();
+        try {
+            return await finishWait(jobId, repeated, context.mcpReq.signal);
+        }
+        finally {
+            if (keepalive)
+                clearInterval(keepalive);
+        }
+    };
+    const finishWait = async (jobId, repeated, signal) => {
+        const result = await manager.waitTaskUntilTerminal(jobId, { signal });
+        const warned = result.warnings && result.warnings.length > 0
+            ? ` - ${result.warnings.length} warning(s): ${result.warnings.join(" ")}`
+            : "";
+        const hint = repeated
+            ? " Hint: a previous wait on this job was cut short by the host; check the README 'Host configuration' section (host tool timeout and code-mode wrapping)."
+            : "";
+        const summary = `Job ${result.job_id} finished with status ${result.status}${warned}. Compact result included; do not call inspect_task unless diagnostics are needed.${hint}`;
+        return { result, summary };
+    };
     // --- Controller Tools ---
     server.registerTool("runtime_info", {
         description: "Read build identity, live execution limits, and this server's usage protocol once at session start or after any restart. Values come from the running build, not external docs. Diagnostic only; do not poll.",
         inputSchema: z.object({})
-    }, () => success({ ...manager.getRuntimeInfo(), instructions: manager.serverInstructions() }, "Bridge runtime identity, limits, and usage protocol."));
+    }, () => success({ ...manager.getRuntimeInfo(), host_warnings: manager.getHostWarnings(clientName()), instructions: manager.serverInstructions() }, "Bridge runtime identity, limits, and usage protocol."));
     server.registerTool("list_models", {
         title: "List Antigravity Models",
         description: "List supported Antigravity models with cache metadata.",
@@ -41,7 +87,7 @@ export function createServer(manager) {
         title: "Create Antigravity Worker",
         description: "Create an isolated Antigravity worker process with role, workspace, and optional constraints.",
         inputSchema: z.object({
-            role: roleSchema.describe("Implementer starts in accept-edits mode; tester is launched with --mode plan, which current agy ignores while slash commands are disabled, so the tester role is advisory (review only by instruction), not an enforced read-only sandbox"),
+            role: roleSchema.describe("Implementer edits (accept-edits); tester reviews by instruction only (--mode plan is ignored by current agy, so it is not read-only)"),
             workspace: z.string().min(1).describe("Workspace directory inside AGY_ALLOWED_ROOTS"),
             required_tools: z.array(z.string().min(1).max(64)).max(16).optional().describe("Task-specific executable names to preflight without launching AGY; module/package availability still needs native verification"),
             model: z.string().optional().describe("Optional model override"),
@@ -51,7 +97,7 @@ export function createServer(manager) {
     }, async ({ role, workspace, required_tools, model, effort, constraints }) => {
         try {
             const result = await manager.createWorker({ role, workspace, requiredTools: required_tools, model, effort, constraints });
-            return success(result, `Created worker ${result.workerId} (${result.role}) in ${result.workspace}.`);
+            return success(result, withHostWarnings(`Created worker ${result.workerId} (${result.role}) in ${result.workspace}.`));
         }
         catch (error) {
             return failure(error);
@@ -59,11 +105,12 @@ export function createServer(manager) {
     });
     server.registerTool("dispatch_task", {
         title: "Dispatch Task",
-        description: "Enqueue a bounded task on a worker. One coherent workstream per dispatch — size the brief to finish within the total deadline (default from runtime_info), counting first-read exploration on a fresh conversation; split multi-part batches into separate dispatches on the same worker. Pin model/effort only with IDs list_models printed. Use a tester worker for review/verification and an implementer worker only for edits. Returns an MCP Task when negotiated, otherwise a job ID immediately.",
+        description: "Enqueue a bounded task: one coherent workstream sized to finish within the total deadline (counting first-read exploration); split multi-part batches. Pin model/effort only with IDs list_models printed. Tester reviews, implementer edits. wait: true also waits until terminal and returns the wait_task result (one controller turn per job; use when nothing runs in parallel); otherwise returns an MCP Task when negotiated, or a job ID, then call wait_task once.",
         inputSchema: z.object({
             worker_id: z.string().min(1).describe("Target worker ID"),
             brief: z.string().min(1).describe("Task brief to enqueue"),
             request_key: z.string().min(1).max(128).optional().describe("Stable retry key; reuse with exactly the same task/options to avoid duplicate work"),
+            wait: z.boolean().optional().describe("true: also wait until terminal and return the wait_task result (one call per job)"),
             total_duration_seconds: z.number().positive().max(86_400).optional().describe("Deadline from dispatch including queue time; defaults to the effective maximum duration. Near the deadline the worker is asked to wrap up and hand off"),
             timeout_seconds: z.number().positive().max(86_400).optional()
                 .describe("Deprecated alias for inactivity_timeout_seconds"),
@@ -72,7 +119,7 @@ export function createServer(manager) {
             max_duration_seconds: z.number().positive().max(86_400).optional()
                 .describe("Absolute wall-clock safety cap even while progress continues")
         })
-    }, async ({ worker_id, brief, request_key, total_duration_seconds, timeout_seconds, inactivity_timeout_seconds, max_duration_seconds }) => {
+    }, async ({ worker_id, brief, request_key, wait, total_duration_seconds, timeout_seconds, inactivity_timeout_seconds, max_duration_seconds }, context) => {
         try {
             if (timeout_seconds !== undefined && inactivity_timeout_seconds !== undefined) {
                 throw new Error("Use either timeout_seconds or inactivity_timeout_seconds, not both");
@@ -81,7 +128,12 @@ export function createServer(manager) {
             const summary = result.warnings && result.warnings.length > 0
                 ? `Dispatched task ${result.jobId} to ${result.role} worker ${result.workerId} (status: ${result.status}). WARNING: ${result.warnings.join(" ")}`
                 : `Dispatched task ${result.jobId} to ${result.role} worker ${result.workerId} (status: ${result.status}).`;
-            return success(result, summary);
+            if (wait === true) {
+                const waited = await waitForTerminal(result.jobId, context);
+                const dispatchNote = result.warnings && result.warnings.length > 0 ? ` DISPATCH WARNING: ${result.warnings.join(" ")}` : "";
+                return success(waited.result, withHostWarnings(`${waited.summary}${dispatchNote}`));
+            }
+            return success(result, withHostWarnings(summary));
         }
         catch (error) {
             return failure(error);
@@ -95,15 +147,7 @@ export function createServer(manager) {
         })
     }, async ({ job_id }, context) => {
         try {
-            const repeated = manager.isRepeatedWait(job_id);
-            const result = await manager.waitTaskUntilTerminal(job_id, { signal: context.mcpReq.signal });
-            const warned = result.warnings && result.warnings.length > 0
-                ? ` - ${result.warnings.length} warning(s): ${result.warnings.join(" ")}`
-                : "";
-            const hint = repeated
-                ? " Hint: a previous wait on this job was cut short by the host; check the README \"Host configuration\" section (host tool timeout and code-mode wrapping)."
-                : "";
-            const summary = `Job ${result.job_id} finished with status ${result.status}${warned}. Compact result included; do not call inspect_task unless diagnostics are needed.${hint}`;
+            const { result, summary } = await waitForTerminal(job_id, context);
             return success(result, summary);
         }
         catch (error) {
@@ -112,11 +156,12 @@ export function createServer(manager) {
     });
     server.registerTool("send_followup", {
         title: "Send Followup",
-        description: "Enqueue related work in the same worker conversation and return immediately.",
+        description: "Enqueue related work in the same worker conversation and return immediately, or with wait: true wait until terminal and return the wait_task result.",
         inputSchema: z.object({
             worker_id: z.string().min(1).describe("Target worker ID"),
             finding: z.string().min(1).describe("Follow-up finding or task in the existing conversation"),
             request_key: z.string().min(1).max(128).optional().describe("Stable key for retries of this follow-up; use a new key for new work"),
+            wait: z.boolean().optional().describe("true: also wait until terminal and return the wait_task result (one call per job)"),
             total_duration_seconds: z.number().positive().max(86_400).optional().describe("Deadline including queue time"),
             timeout_seconds: z.number().positive().max(86_400).optional()
                 .describe("Deprecated alias for inactivity_timeout_seconds"),
@@ -125,13 +170,17 @@ export function createServer(manager) {
             max_duration_seconds: z.number().positive().max(86_400).optional()
                 .describe("Absolute wall-clock safety cap even while progress continues")
         })
-    }, async ({ worker_id, finding, request_key, total_duration_seconds, timeout_seconds, inactivity_timeout_seconds, max_duration_seconds }) => {
+    }, async ({ worker_id, finding, request_key, wait, total_duration_seconds, timeout_seconds, inactivity_timeout_seconds, max_duration_seconds }, context) => {
         try {
             if (timeout_seconds !== undefined && inactivity_timeout_seconds !== undefined) {
                 throw new Error("Use either timeout_seconds or inactivity_timeout_seconds, not both");
             }
             const result = await manager.sendFollowup(worker_id, finding, inactivity_timeout_seconds ?? timeout_seconds, max_duration_seconds, { requestKey: request_key, totalDurationSeconds: total_duration_seconds });
-            return success(result, `Enqueued follow-up ${result.jobId} on worker ${result.workerId}.`);
+            if (wait === true) {
+                const waited = await waitForTerminal(result.jobId, context);
+                return success(waited.result, withHostWarnings(waited.summary));
+            }
+            return success(result, withHostWarnings(`Enqueued follow-up ${result.jobId} on worker ${result.workerId}.`));
         }
         catch (error) {
             return failure(error);
