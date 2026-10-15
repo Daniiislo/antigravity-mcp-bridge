@@ -4,7 +4,7 @@ Deep-dive material for the Antigravity MCP Bridge — everything trimmed from th
 
 ## Deadline, retry, and preflight contracts
 
-`dispatch_task` and `send_followup` accept `total_duration_seconds`, measured from dispatch including queue time. It defaults to the effective maximum duration (1800 seconds with default configuration). Queued expiry does not start AGY; active expiry waits for confirmed process-tree cleanup before queue advancement. Set the host tool timeout above this total budget plus cleanup margin. The compatibility `agy_delegate` remains a direct turn and has no manager queue deadline.
+`dispatch_task` and `send_followup` accept `total_duration_seconds`, measured from dispatch including queue time. It defaults to the effective maximum duration (1800 seconds with default configuration). Queued expiry does not start AGY; active expiry waits for confirmed process-tree cleanup before queue advancement. Set the host tool timeout above this total budget plus cleanup margin (see [Host configuration](../README.md#host-configuration-codex) for the Codex settings). The compatibility `agy_delegate` remains a direct turn and has no manager queue deadline.
 
 Near the deadline (45 seconds before the hard cap by default) the bridge sends a FINISH_NOW event asking the worker to wrap up. A result returned inside that grace window is a normal terminal handoff, not a failure — partial work is preserved instead of killed mid-write.
 

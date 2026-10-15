@@ -48,6 +48,12 @@ export declare function quotePowerShellArg(arg: string): string;
 export declare function formatBashCommand(parts: string[]): string;
 export declare function formatPowerShellCommand(command: string, args: string[]): string;
 export declare function buildCodexRegistration(options?: BuildRegistrationOptions): CodexRegistrationPlan;
+/**
+ * `codex mcp add` has no flag for the per-server tool timeout, so a CLI
+ * registration leaves Codex at its 300 s default, which cuts long jobs short.
+ * These lines tell the user the one-time config edit that fixes it.
+ */
+export declare function codexHostConfigHint(name: string, toolTimeoutSeconds?: number): string[];
 export declare function buildClaudeRegistration(options?: BuildRegistrationOptions): ClaudeRegistrationPlan;
 export declare function executeCodexRegistration(plan: CodexRegistrationPlan, options?: {
     dryRun?: boolean;

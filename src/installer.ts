@@ -226,6 +226,24 @@ export function buildCodexRegistration(options: BuildRegistrationOptions = {}): 
   };
 }
 
+/**
+ * `codex mcp add` has no flag for the per-server tool timeout, so a CLI
+ * registration leaves Codex at its 300 s default, which cuts long jobs short.
+ * These lines tell the user the one-time config edit that fixes it.
+ */
+export function codexHostConfigHint(name: string, toolTimeoutSeconds = 3600): string[] {
+  return [
+    `Next step: raise the Codex tool timeout for "${name}" so long jobs are not cut off at the 300 s default.`,
+    `Add this to your Codex config.toml:`,
+    `  [mcp_servers.${name}]`,
+    `  tool_timeout_sec = ${toolTimeoutSeconds}`,
+    "To avoid model-driven polling, also list the server's tool namespace as direct-only:",
+    "  [features.code_mode]",
+    `  direct_only_tool_namespaces = ["mcp__${name.replace(/[^A-Za-z0-9_]/g, "_")}"]`,
+    "Details: README \"Host configuration\" section."
+  ];
+}
+
 export function buildClaudeRegistration(options: BuildRegistrationOptions = {}): ClaudeRegistrationPlan {
   const platform = options.platform ?? process.platform;
   const delimiter = platform === "win32" ? ";" : ":";
@@ -384,6 +402,8 @@ Examples:
     console.log(`  ${plan.getCommand}`);
     console.log("\nRemoval / Update Command:");
     console.log(`  ${plan.removeCommand}`);
+    console.log("\nAfter registering:");
+    for (const line of codexHostConfigHint(plan.name)) console.log(`  ${line}`);
     console.log("\nNo changes made (--dry-run enabled).\n");
     return;
   }
@@ -394,6 +414,8 @@ Examples:
   if (result.stdout?.trim()) console.log(result.stdout.trim());
   console.log(`Verify registration: ${plan.getCommand}`);
   console.log(`Remove registration: ${plan.removeCommand}`);
+  console.log("");
+  for (const line of codexHostConfigHint(plan.name)) console.log(line);
 }
 
 export async function runClaudeInstallerCli(argv: string[] = process.argv.slice(2)): Promise<void> {

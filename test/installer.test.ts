@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildClaudeRegistration,
   buildCodexRegistration,
+  codexHostConfigHint,
   executeCodexRegistration,
   formatBashCommand,
   formatPowerShellCommand,
@@ -289,6 +290,16 @@ describe("installer CLI and Codex registration", () => {
         })
       ).toThrow(/unsafe control characters/i);
     });
+  });
+});
+
+describe("Codex host configuration hint", () => {
+  it("names the timeout and the direct-only namespace derived from the server name", () => {
+    const text = codexHostConfigHint("antigravity-bridge").join("\n");
+    expect(text).toContain("[mcp_servers.antigravity-bridge]");
+    expect(text).toContain("tool_timeout_sec = 3600");
+    expect(text).toContain('direct_only_tool_namespaces = ["mcp__antigravity_bridge"]');
+    expect(text).toContain("Host configuration");
   });
 });
 

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 export function runtimeInfo(config) {
     const extension = import.meta.url.endsWith(".ts") ? "ts" : "js";
     const hash = createHash("sha256");
-    for (const name of ["server", "worker-manager", "agy-worker", "config", "task-aware-server", "event-store", "process-tree", "preflight"]) {
+    for (const name of ["server", "worker-manager", "agy-worker", "config", "task-aware-server", "event-store", "job-activity", "process-tree", "preflight"]) {
         hash.update(readFileSync(new URL(`./${name}.${extension}`, import.meta.url)));
     }
     return {
