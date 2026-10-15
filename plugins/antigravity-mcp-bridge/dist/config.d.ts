@@ -19,6 +19,8 @@ export interface BridgeConfig {
     /** Maximum streamed turn tokens observed before another step may start. */
     maxTurnTokens?: number;
     maxStderrBytes: number;
+    /** Append the lean working-rules/handoff contract to every job prompt (AGY_WORKER_RULES=off disables). */
+    workerRules?: boolean;
     dashboardEnabled?: boolean;
     dashboardPort?: number;
 }

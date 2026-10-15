@@ -147,6 +147,8 @@ export interface InspectTaskResult {
     response_char_budget: number;
     response_truncated: boolean;
 }
+/** Short bridge contract appended to every job prompt: fewer re-reads and a bounded handoff keep controller context small. */
+export declare const WORKER_RULES = "[Working rules] Read each needed file once, whole, before editing; do not re-read a file you just wrote unless an edit failed. Prefer targeted edits over rewrites. Run only the commands the task needs.\n[Handoff] End with a concise handoff (max ~1,200 characters): files changed, checks run with results, anything unfinished. Do not restate the task.";
 export declare class WorkerManager {
     private readonly config;
     private readonly prefixArgs;
@@ -155,6 +157,7 @@ export declare class WorkerManager {
     private readonly jobs;
     /** Jobs whose previous wait was aborted by the host while still running. */
     private readonly abortedWaits;
+    private hostWarningsShown;
     private requestHistory?;
     private readonly eventStore;
     private readonly modelCatalog;
@@ -183,6 +186,10 @@ export declare class WorkerManager {
         add_dirs: string[];
         tasks_capability_gated: boolean;
     };
+    /** Read-only host configuration warnings for the connected client (empty for unknown hosts). */
+    getHostWarnings(clientName: string | undefined): string[];
+    /** Host warnings the first time only, so the first dispatch-like response carries them once per process. */
+    takeFirstCallHostWarnings(clientName: string | undefined): string[];
     /**
      * Usage protocol served to the host agent through the MCP initialize result.
      * Generated from live config so every bridge version teaches its own current

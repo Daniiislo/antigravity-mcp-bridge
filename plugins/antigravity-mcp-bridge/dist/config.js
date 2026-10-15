@@ -202,6 +202,11 @@ export function loadConfig(env = process.env, startDirectory = process.cwd(), op
     const maxStderrBytes = positiveInteger(env, "AGY_MAX_STDERR_BYTES", 32_768);
     const maxSteps = env.AGY_MAX_STEPS ? positiveInteger(env, "AGY_MAX_STEPS", 48) : undefined;
     const maxTurnTokens = env.AGY_MAX_TURN_TOKENS ? positiveInteger(env, "AGY_MAX_TURN_TOKENS", 60_000) : undefined;
+    const workerRulesRaw = env.AGY_WORKER_RULES?.trim().toLowerCase();
+    if (workerRulesRaw && !["on", "off", "true", "false", "1", "0"].includes(workerRulesRaw)) {
+        throw new Error("AGY_WORKER_RULES must be on or off");
+    }
+    const workerRules = !["off", "false", "0"].includes(workerRulesRaw ?? "");
     const dashboardEnabled = booleanValue(env, "AGY_DASHBOARD_ENABLED", true);
     const dashboardPort = portNumber(env, "AGY_DASHBOARD_PORT", 0);
     // Precedence: AGY_ALLOWED_ROOTS env > per-user config file > user home.
@@ -263,6 +268,7 @@ export function loadConfig(env = process.env, startDirectory = process.cwd(), op
         ...(maxSteps !== undefined ? { maxSteps } : {}),
         ...(maxTurnTokens !== undefined ? { maxTurnTokens } : {}),
         maxStderrBytes,
+        workerRules,
         dashboardEnabled,
         dashboardPort
     };

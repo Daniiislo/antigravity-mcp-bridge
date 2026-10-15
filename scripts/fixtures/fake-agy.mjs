@@ -164,6 +164,13 @@ input.on("line", (line) => {
     emitResult("Running the check.");
     return;
   }
+  if (typeof content === "string" && content.startsWith("RESPONSE_CHARS:")) {
+    // A typical implementer turn: one edit, one check, and a response of the requested size.
+    emitStep({ step_index: 2, state: "DONE", step_type: "tool", tool_name: "write_to_file", tool_info: { name: "write_to_file", parameters: { TargetFile: "src/example.ts" } } });
+    emitStep({ step_index: 3, state: "DONE", step_type: "tool", tool_name: "run_command", tool_info: { name: "run_command", parameters: { CommandLine: "npm test" } } });
+    emitResult("x".repeat(Number(content.slice("RESPONSE_CHARS:".length)) || 1000));
+    return;
+  }
   if (content === "CLEAN") {
     emitStep({ step_index: 1, state: "DONE", step_type: "agent_response", text_delta: "ok" });
     emitResult("clean turn");
