@@ -120,12 +120,7 @@ export function resolveUserConfigPath(env = process.env, homeDirectory = homedir
         return path.resolve(env.AGY_USER_CONFIG);
     return path.join(homeDirectory, ".antigravity-bridge", "config.json");
 }
-/**
- * Read `allowed_roots` from the per-user config file. Returns undefined when
- * the file is absent; malformed JSON or a non-array value is a hard error so
- * a typo cannot silently widen or narrow the workspace boundary.
- */
-export function readUserAllowedRoots(env = process.env, homeDirectory = homedir(), reader = (file) => readFileSync(file, "utf8")) {
+function readUserConfigFile(env, homeDirectory, reader) {
     const file = resolveUserConfigPath(env, homeDirectory);
     if (!existsSync(file))
         return undefined;
@@ -139,13 +134,29 @@ export function readUserAllowedRoots(env = process.env, homeDirectory = homedir(
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error(`${file} must contain a JSON object`);
     }
-    const config = parsed;
-    if (config.allowed_roots === undefined)
+    return { file, config: parsed };
+}
+function directoryList(value, file, key) {
+    if (value === undefined)
         return undefined;
-    if (!Array.isArray(config.allowed_roots) || !config.allowed_roots.every((root) => typeof root === "string" && root.trim() !== "")) {
-        throw new Error(`${file}: allowed_roots must be an array of directory paths`);
+    if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.trim() !== "")) {
+        throw new Error(`${file}: ${key} must be an array of directory paths`);
     }
-    return config.allowed_roots;
+    return value;
+}
+/**
+ * Read `allowed_roots` from the per-user config file. Returns undefined when
+ * the file is absent; malformed JSON or a non-array value is a hard error so
+ * a typo cannot silently widen or narrow the workspace boundary.
+ */
+export function readUserAllowedRoots(env = process.env, homeDirectory = homedir(), reader = (file) => readFileSync(file, "utf8")) {
+    const loaded = readUserConfigFile(env, homeDirectory, reader);
+    return loaded ? directoryList(loaded.config.allowed_roots, loaded.file, "allowed_roots") : undefined;
+}
+/** Read `add_dirs` (extra worker directories) from the per-user config file; same validation as allowed_roots. */
+export function readUserAddDirs(env = process.env, homeDirectory = homedir(), reader = (file) => readFileSync(file, "utf8")) {
+    const loaded = readUserConfigFile(env, homeDirectory, reader);
+    return loaded ? directoryList(loaded.config.add_dirs, loaded.file, "add_dirs") : undefined;
 }
 function canonicalDirectory(input, label) {
     try {
@@ -202,6 +213,11 @@ export function loadConfig(env = process.env, startDirectory = process.cwd(), op
         ?? fileRoots
         ?? [homeDirectory];
     const allowedRoots = configuredRoots.map((root) => canonicalDirectory(root, root === homeDirectory ? "user home (default allowed root)" : "AGY_ALLOWED_ROOTS entry"));
+    // Same precedence for extra worker directories: AGY_ADD_DIRS env > config file > none.
+    const configuredAddDirs = env.AGY_ADD_DIRS?.split(path.delimiter).filter(Boolean)
+        ?? readUserAddDirs(env, homeDirectory, options?.configReader)
+        ?? [];
+    const addDirs = [...new Set(configuredAddDirs.map((dir) => canonicalDirectory(dir, "add_dirs entry")))];
     const model = env.AGY_MODEL || undefined;
     const effort = optionalEffort(env.AGY_EFFORT);
     const agent = env.AGY_AGENT || undefined;
@@ -235,6 +251,7 @@ export function loadConfig(env = process.env, startDirectory = process.cwd(), op
         executable,
         ...(baseArgs ? { baseArgs } : {}),
         allowedRoots,
+        addDirs,
         runsDir,
         ...(model ? { model } : {}),
         ...(effort ? { effort } : {}),

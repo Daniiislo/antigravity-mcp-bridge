@@ -169,6 +169,7 @@ export declare class WorkerManager {
         steps_budget: number | null;
         observed_token_budget: number | null;
         allowed_roots: string[];
+        add_dirs: string[];
         tasks_capability_gated: boolean;
     };
     /**

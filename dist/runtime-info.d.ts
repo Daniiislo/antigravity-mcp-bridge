@@ -7,5 +7,6 @@ export declare function runtimeInfo(config: BridgeConfig): {
     steps_budget: number | null;
     observed_token_budget: number | null;
     allowed_roots: string[];
+    add_dirs: string[];
     tasks_capability_gated: boolean;
 };

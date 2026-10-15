@@ -9,6 +9,8 @@ export interface BridgeConfig {
   executable: string;
   baseArgs?: string[];
   allowedRoots: string[];
+  /** Extra directories every worker may read in addition to its workspace (agy --add-dir). */
+  addDirs?: string[];
   runsDir?: string;
   model?: string;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
@@ -161,6 +163,34 @@ export function resolveUserConfigPath(
 
 export interface UserConfigFile {
   allowed_roots?: string[];
+  add_dirs?: string[];
+}
+
+function readUserConfigFile(
+  env: NodeJS.ProcessEnv,
+  homeDirectory: string,
+  reader: (file: string) => string
+): { file: string; config: UserConfigFile } | undefined {
+  const file = resolveUserConfigPath(env, homeDirectory);
+  if (!existsSync(file)) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(reader(file));
+  } catch (error) {
+    throw new Error(`${file} is not valid JSON: ${(error as Error).message}`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${file} must contain a JSON object`);
+  }
+  return { file, config: parsed as UserConfigFile };
+}
+
+function directoryList(value: unknown, file: string, key: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.trim() !== "")) {
+    throw new Error(`${file}: ${key} must be an array of directory paths`);
+  }
+  return value;
 }
 
 /**
@@ -173,23 +203,18 @@ export function readUserAllowedRoots(
   homeDirectory = homedir(),
   reader: (file: string) => string = (file) => readFileSync(file, "utf8")
 ): string[] | undefined {
-  const file = resolveUserConfigPath(env, homeDirectory);
-  if (!existsSync(file)) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(reader(file));
-  } catch (error) {
-    throw new Error(`${file} is not valid JSON: ${(error as Error).message}`);
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`${file} must contain a JSON object`);
-  }
-  const config = parsed as UserConfigFile;
-  if (config.allowed_roots === undefined) return undefined;
-  if (!Array.isArray(config.allowed_roots) || !config.allowed_roots.every((root) => typeof root === "string" && root.trim() !== "")) {
-    throw new Error(`${file}: allowed_roots must be an array of directory paths`);
-  }
-  return config.allowed_roots;
+  const loaded = readUserConfigFile(env, homeDirectory, reader);
+  return loaded ? directoryList(loaded.config.allowed_roots, loaded.file, "allowed_roots") : undefined;
+}
+
+/** Read `add_dirs` (extra worker directories) from the per-user config file; same validation as allowed_roots. */
+export function readUserAddDirs(
+  env: NodeJS.ProcessEnv = process.env,
+  homeDirectory = homedir(),
+  reader: (file: string) => string = (file) => readFileSync(file, "utf8")
+): string[] | undefined {
+  const loaded = readUserConfigFile(env, homeDirectory, reader);
+  return loaded ? directoryList(loaded.config.add_dirs, loaded.file, "add_dirs") : undefined;
 }
 
 function canonicalDirectory(input: string, label: string): string {
@@ -252,6 +277,11 @@ export function loadConfig(
     ?? fileRoots
     ?? [homeDirectory];
   const allowedRoots = configuredRoots.map((root) => canonicalDirectory(root, root === homeDirectory ? "user home (default allowed root)" : "AGY_ALLOWED_ROOTS entry"));
+  // Same precedence for extra worker directories: AGY_ADD_DIRS env > config file > none.
+  const configuredAddDirs = env.AGY_ADD_DIRS?.split(path.delimiter).filter(Boolean)
+    ?? readUserAddDirs(env, homeDirectory, options?.configReader)
+    ?? [];
+  const addDirs = [...new Set(configuredAddDirs.map((dir) => canonicalDirectory(dir, "add_dirs entry")))];
   const model = env.AGY_MODEL || undefined;
   const effort = optionalEffort(env.AGY_EFFORT);
   const agent = env.AGY_AGENT || undefined;
@@ -281,6 +311,7 @@ export function loadConfig(
     executable,
     ...(baseArgs ? { baseArgs } : {}),
     allowedRoots,
+    addDirs,
     runsDir,
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),

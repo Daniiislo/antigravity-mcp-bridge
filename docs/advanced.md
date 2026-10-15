@@ -61,11 +61,12 @@ For offline diagnosis, run `node scripts/analyze-runs.mjs [runs-directory]` afte
 
 ## Configuration reference
 
-All configuration is environment variables except `allowed_roots`, which lives in `~/.antigravity-bridge/config.json` (see the [README](../README.md#one-required-setting-allowed-workspace-roots)). The server does not automatically load `.env` files. See [`.env.example`](../.env.example) for a template.
+All configuration is environment variables except `allowed_roots` and `add_dirs`, which live in `~/.antigravity-bridge/config.json` (see the [README](../README.md#one-required-setting-allowed-workspace-roots)). The server does not automatically load `.env` files. See [`.env.example`](../.env.example) for a template.
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `AGY_ALLOWED_ROOTS` | config file → user home | Allowed workspace roots; separated by `;` on Windows and `:` on macOS/Linux. Overrides the config file. |
+| `AGY_ADD_DIRS` | config file `add_dirs` → none | Extra directories passed to every worker as additional `--add-dir` flags, in addition to its workspace. Separated like `AGY_ALLOWED_ROOTS`; overrides the file. Each entry must be an existing directory and is canonicalized; a malformed `add_dirs` value is a hard error. Antigravity checks the literal path, so reference the real path: a symlink or junction alias of an added directory is still denied. |
 | `AGY_USER_CONFIG` | `~/.antigravity-bridge/config.json` | Path to the per-user config file. |
 | `AGY_BIN` | Auto-discovered | Exact `agy` executable or command name. |
 | `AGY_RUNS_DIR` | Per-user shared state directory | Override the NDJSON event directory. The default is `%LOCALAPPDATA%\antigravity-mcp-bridge\runs` on Windows, `~/Library/Application Support/antigravity-mcp-bridge/runs` on macOS, and `${XDG_STATE_HOME:-~/.local/state}/antigravity-mcp-bridge/runs` on Linux. |

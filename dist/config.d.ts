@@ -3,6 +3,8 @@ export interface BridgeConfig {
     executable: string;
     baseArgs?: string[];
     allowedRoots: string[];
+    /** Extra directories every worker may read in addition to its workspace (agy --add-dir). */
+    addDirs?: string[];
     runsDir?: string;
     model?: string;
     effort?: "low" | "medium" | "high" | "xhigh" | "max";
@@ -30,6 +32,7 @@ export declare function resolveCandidateRunsDirs(configuredRunsDir?: string, env
 export declare function resolveUserConfigPath(env?: NodeJS.ProcessEnv, homeDirectory?: string): string;
 export interface UserConfigFile {
     allowed_roots?: string[];
+    add_dirs?: string[];
 }
 /**
  * Read `allowed_roots` from the per-user config file. Returns undefined when
@@ -37,6 +40,8 @@ export interface UserConfigFile {
  * a typo cannot silently widen or narrow the workspace boundary.
  */
 export declare function readUserAllowedRoots(env?: NodeJS.ProcessEnv, homeDirectory?: string, reader?: (file: string) => string): string[] | undefined;
+/** Read `add_dirs` (extra worker directories) from the per-user config file; same validation as allowed_roots. */
+export declare function readUserAddDirs(env?: NodeJS.ProcessEnv, homeDirectory?: string, reader?: (file: string) => string): string[] | undefined;
 export declare function resolveAllowedWorkspace(cwd: string, roots: string[]): string;
 export declare function loadConfig(env?: NodeJS.ProcessEnv, startDirectory?: string, options?: {
     resolveExecutable?: boolean;

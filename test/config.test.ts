@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig, readUserAllowedRoots, resolveAllowedWorkspace, resolveCandidateRunsDirs, resolveDefaultRunsDir, resolveUserConfigPath } from "../src/config.js";
+import { loadConfig, readUserAddDirs, readUserAllowedRoots, resolveAllowedWorkspace, resolveCandidateRunsDirs, resolveDefaultRunsDir, resolveUserConfigPath } from "../src/config.js";
 
 const created: string[] = [];
 afterEach(() => {
@@ -275,5 +275,46 @@ describe("configuration", () => {
     expect(() => loadConfig({ AGY_DASHBOARD_PORT: "-1" }, process.cwd(), { resolveExecutable: false })).toThrow(/AGY_DASHBOARD_PORT/);
     expect(() => loadConfig({ AGY_DASHBOARD_PORT: "70000" }, process.cwd(), { resolveExecutable: false })).toThrow(/AGY_DASHBOARD_PORT/);
     expect(() => loadConfig({ AGY_DASHBOARD_PORT: "not-a-port" }, process.cwd(), { resolveExecutable: false })).toThrow(/AGY_DASHBOARD_PORT/);
+  });
+});
+
+describe("add_dirs", () => {
+  function homeWith(config: unknown): { home: string; extra: string } {
+    const home = mkdtempSync(path.join(tmpdir(), "agy-adddirs-"));
+    created.push(home);
+    const extra = path.join(home, "shared-skills");
+    mkdirSync(extra);
+    const configDir = path.join(home, ".antigravity-bridge");
+    mkdirSync(configDir);
+    writeFileSync(path.join(configDir, "config.json"), JSON.stringify(config));
+    return { home, extra };
+  }
+
+  it("reads and canonicalizes add_dirs from the config file", () => {
+    const home = mkdtempSync(path.join(tmpdir(), "agy-adddirs-"));
+    created.push(home);
+    const extra = path.join(home, "extra");
+    mkdirSync(extra);
+    mkdirSync(path.join(home, ".antigravity-bridge"));
+    writeFileSync(path.join(home, ".antigravity-bridge", "config.json"), JSON.stringify({ add_dirs: [extra] }));
+    expect(readUserAddDirs({}, home)).toEqual([extra]);
+    const cfg = loadConfig({}, process.cwd(), { resolveExecutable: false, homeDirectory: home });
+    expect(cfg.addDirs).toEqual([realpathSync.native(extra)]);
+  });
+
+  it("defaults to no extra directories and lets AGY_ADD_DIRS win over the file", () => {
+    const { home, extra } = homeWith({ add_dirs: [] });
+    const envDir = path.join(home, "env-dir");
+    mkdirSync(envDir);
+    expect(loadConfig({}, process.cwd(), { resolveExecutable: false, homeDirectory: home }).addDirs).toEqual([]);
+    const fromEnv = loadConfig({ AGY_ADD_DIRS: [envDir, extra].join(path.delimiter) }, process.cwd(), { resolveExecutable: false, homeDirectory: home });
+    expect(fromEnv.addDirs).toEqual([realpathSync.native(envDir), realpathSync.native(extra)]);
+  });
+
+  it("treats malformed add_dirs and missing directories as hard errors", () => {
+    const bad = homeWith({ add_dirs: "not-an-array" });
+    expect(() => loadConfig({}, process.cwd(), { resolveExecutable: false, homeDirectory: bad.home })).toThrow(/add_dirs must be an array/);
+    const missing = homeWith({ add_dirs: [path.join(tmpdir(), "agy-definitely-missing-dir")] });
+    expect(() => loadConfig({}, process.cwd(), { resolveExecutable: false, homeDirectory: missing.home })).toThrow(/add_dirs entry must be an existing directory/);
   });
 });

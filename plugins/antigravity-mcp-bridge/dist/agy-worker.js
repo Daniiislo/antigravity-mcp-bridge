@@ -187,7 +187,9 @@ export class AgyWorker {
         const args = [
             ...(this.options.prefixArgs ?? []),
             "--input-format", "stream-json", "--output-format", "stream-json", "--print-timeout", "0", "--mode", this.options.mode,
-            "--add-dir", this.options.cwd, "--disable-slash-commands"
+            "--add-dir", this.options.cwd,
+            ...(this.options.addDirs ?? []).filter((dir) => dir !== this.options.cwd).flatMap((dir) => ["--add-dir", dir]),
+            "--disable-slash-commands"
         ];
         if (this.conversationId)
             args.push("--conversation", this.conversationId);
