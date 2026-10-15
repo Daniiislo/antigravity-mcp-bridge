@@ -4,6 +4,8 @@ Deep-dive material for the Antigravity MCP Bridge — everything trimmed from th
 
 ## Deadline, retry, and preflight contracts
 
+`dispatch_task` and `send_followup` also accept `wait: true`, which waits for the terminal result in the same call (aborting the call leaves the job running; a later `wait_task` works). While any wait is pending and the caller supplied a progress token, the server sends `notifications/progress` about every 30 seconds with the job status and last progress line (never in the tool result).
+
 `dispatch_task` and `send_followup` accept `total_duration_seconds`, measured from dispatch including queue time. It defaults to the effective maximum duration (1800 seconds with default configuration). Queued expiry does not start AGY; active expiry waits for confirmed process-tree cleanup before queue advancement. Set the host tool timeout above this total budget plus cleanup margin (see [Host configuration](../README.md#host-configuration-codex) for the Codex settings). The compatibility `agy_delegate` remains a direct turn and has no manager queue deadline.
 
 Near the deadline (45 seconds before the hard cap by default) the bridge sends a FINISH_NOW event asking the worker to wrap up. A result returned inside that grace window is a normal terminal handoff, not a failure — partial work is preserved instead of killed mid-write.
@@ -81,6 +83,7 @@ All configuration is environment variables except `allowed_roots` and `add_dirs`
 | Variable | Default | Description |
 | --- | --- | --- |
 | `AGY_ALLOWED_ROOTS` | config file → user home | Allowed workspace roots; separated by `;` on Windows and `:` on macOS/Linux. Overrides the config file. |
+| `AGY_WORKER_RULES` | `on` | When not `off`, every job prompt gets a short bridge contract before `[Task]`: read each needed file once, prefer targeted edits, run only needed commands, and end with a handoff of at most about 1,200 characters. `off` sends the brief (plus any constraints/budget) unchanged. |
 | `AGY_ADD_DIRS` | config file `add_dirs` → none | Extra directories passed to every worker as additional `--add-dir` flags, in addition to its workspace. Separated like `AGY_ALLOWED_ROOTS`; overrides the file. Each entry must be an existing directory and is canonicalized; a malformed `add_dirs` value is a hard error. Antigravity checks the literal path, so reference the real path: a symlink or junction alias of an added directory is still denied. |
 | `AGY_USER_CONFIG` | `~/.antigravity-bridge/config.json` | Path to the per-user config file. |
 | `AGY_BIN` | Auto-discovered | Exact `agy` executable or command name. |
