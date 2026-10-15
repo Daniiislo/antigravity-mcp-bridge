@@ -15,6 +15,7 @@ export function runtimeInfo(config) {
         observed_token_budget: config.maxTurnTokens ?? null,
         allowed_roots: config.allowedRoots,
         add_dirs: config.addDirs ?? [],
+        toolset: config.toolset ?? "core",
         tasks_capability_gated: true
     };
 }

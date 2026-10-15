@@ -1,10 +1,13 @@
 export type Role = "implementer" | "tester";
+export type Toolset = "core" | "full";
 export interface BridgeConfig {
     executable: string;
     baseArgs?: string[];
     allowedRoots: string[];
     /** Extra directories every worker may read in addition to its workspace (agy --add-dir). */
     addDirs?: string[];
+    /** "core" (default) hides the legacy/maintenance tools; "full" registers every tool. */
+    toolset?: Toolset;
     runsDir?: string;
     model?: string;
     effort?: "low" | "medium" | "high" | "xhigh" | "max";
@@ -35,7 +38,10 @@ export declare function resolveUserConfigPath(env?: NodeJS.ProcessEnv, homeDirec
 export interface UserConfigFile {
     allowed_roots?: string[];
     add_dirs?: string[];
+    toolset?: string;
 }
+/** Read `toolset` from the per-user config file; an invalid value is a hard error. */
+export declare function readUserToolset(env?: NodeJS.ProcessEnv, homeDirectory?: string, reader?: (file: string) => string): Toolset | undefined;
 /**
  * Read `allowed_roots` from the per-user config file. Returns undefined when
  * the file is absent; malformed JSON or a non-array value is a hard error so

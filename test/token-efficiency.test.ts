@@ -1,11 +1,11 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
-import { loadConfig, type BridgeConfig } from "../src/config.js";
+import { loadConfig, readUserToolset, type BridgeConfig } from "../src/config.js";
 import { hostWarnings, parseCodexConfig } from "../src/host-check.js";
 import { createServer } from "../src/server.js";
 import { WORKER_RULES, WorkerManager } from "../src/worker-manager.js";
@@ -286,9 +286,57 @@ describe("lean worker contract", () => {
   });
 });
 
+const HIDDEN_IN_CORE = ["agy_delegate", "agy_status", "agy_reset", "agy_stop", "clean_history", "delete_task"];
+
+describe("toolset", () => {
+  it("registers only the core tools by default and keeps recovery and dashboard tools visible", async () => {
+    const client = await connect(makeManager());
+    const names = (await client.listTools()).tools.map((tool) => tool.name);
+    expect(names).toHaveLength(12);
+    for (const hidden of HIDDEN_IN_CORE) expect(names).not.toContain(hidden);
+    for (const kept of ["agy_history", "agy_events", "open_dashboard", "dispatch_task", "wait_task"]) expect(names).toContain(kept);
+
+    const info = (await client.callTool({ name: "runtime_info", arguments: {} })).structuredContent as { toolset: string; instructions: string };
+    expect(info.toolset).toBe("core");
+    for (const hidden of HIDDEN_IN_CORE) expect(info.instructions).not.toContain(hidden);
+    const descriptions = (await client.listTools()).tools.map((tool) => tool.description ?? "").join(" ");
+    for (const hidden of HIDDEN_IN_CORE) expect(descriptions).not.toContain(hidden);
+
+    const call = await client.callTool({ name: "agy_delegate", arguments: { role: "implementer", task: "x", cwd: process.cwd() } }).catch((error: unknown) => error);
+    expect((call as { isError?: boolean }).isError === true || call instanceof Error).toBe(true);
+  });
+
+  it("registers every tool in full mode", async () => {
+    const client = await connect(makeManager({ toolset: "full" }));
+    const names = (await client.listTools()).tools.map((tool) => tool.name);
+    expect(names).toHaveLength(18);
+    for (const hidden of HIDDEN_IN_CORE) expect(names).toContain(hidden);
+    const info = (await client.callTool({ name: "runtime_info", arguments: {} })).structuredContent as { toolset: string };
+    expect(info.toolset).toBe("full");
+  });
+
+  it("reads AGY_TOOLSET and the config file key, with env winning and invalid values rejected", () => {
+    const home = mkdtempSync(path.join(tmpdir(), "agy-toolset-"));
+    tempDirs.push(home);
+    mkdirSync(path.join(home, ".antigravity-bridge"));
+    const file = path.join(home, ".antigravity-bridge", "config.json");
+    const options = { resolveExecutable: false, homeDirectory: home };
+    const base = { AGY_ALLOWED_ROOTS: process.cwd() };
+
+    expect(loadConfig(base, process.cwd(), options).toolset).toBe("core");
+    writeFileSync(file, JSON.stringify({ toolset: "full" }));
+    expect(readUserToolset({}, home)).toBe("full");
+    expect(loadConfig(base, process.cwd(), options).toolset).toBe("full");
+    expect(loadConfig({ ...base, AGY_TOOLSET: "core" }, process.cwd(), options).toolset).toBe("core");
+    expect(() => loadConfig({ ...base, AGY_TOOLSET: "all" }, process.cwd(), options)).toThrow(/AGY_TOOLSET must be "core" or "full"/);
+    writeFileSync(file, JSON.stringify({ toolset: "everything" }));
+    expect(() => loadConfig(base, process.cwd(), options)).toThrow(/toolset must be "core" or "full"/);
+  });
+});
+
 describe("controller context budget", () => {
   // Budgets are the measured size after the token-efficiency work plus ~10%.
-  const TOOL_CHARS_BUDGET = 13_200;
+  const TOOL_CHARS_BUDGET = 9_300; // core toolset (measured 8,413)
   const INSTRUCTIONS_BUDGET = 3_300;
   const PAYLOAD_BUDGET = 4_000;
 

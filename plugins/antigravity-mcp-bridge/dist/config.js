@@ -136,6 +136,18 @@ function readUserConfigFile(env, homeDirectory, reader) {
     }
     return { file, config: parsed };
 }
+function parseToolset(value, source) {
+    if (value === undefined || value === "")
+        return undefined;
+    if (value === "core" || value === "full")
+        return value;
+    throw new Error(`${source} must be "core" or "full"`);
+}
+/** Read `toolset` from the per-user config file; an invalid value is a hard error. */
+export function readUserToolset(env = process.env, homeDirectory = homedir(), reader = (file) => readFileSync(file, "utf8")) {
+    const loaded = readUserConfigFile(env, homeDirectory, reader);
+    return loaded ? parseToolset(loaded.config.toolset, `${loaded.file}: toolset`) : undefined;
+}
 function directoryList(value, file, key) {
     if (value === undefined)
         return undefined;
@@ -223,6 +235,10 @@ export function loadConfig(env = process.env, startDirectory = process.cwd(), op
         ?? readUserAddDirs(env, homeDirectory, options?.configReader)
         ?? [];
     const addDirs = [...new Set(configuredAddDirs.map((dir) => canonicalDirectory(dir, "add_dirs entry")))];
+    // Same precedence: AGY_TOOLSET env > config file > core.
+    const toolset = parseToolset(env.AGY_TOOLSET?.trim(), "AGY_TOOLSET")
+        ?? readUserToolset(env, homeDirectory, options?.configReader)
+        ?? "core";
     const model = env.AGY_MODEL || undefined;
     const effort = optionalEffort(env.AGY_EFFORT);
     const agent = env.AGY_AGENT || undefined;
@@ -257,6 +273,7 @@ export function loadConfig(env = process.env, startDirectory = process.cwd(), op
         ...(baseArgs ? { baseArgs } : {}),
         allowedRoots,
         addDirs,
+        toolset,
         runsDir,
         ...(model ? { model } : {}),
         ...(effort ? { effort } : {}),

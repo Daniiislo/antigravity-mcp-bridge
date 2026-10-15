@@ -101,7 +101,7 @@ create_worker → dispatch_task → (host observes completion via MCP Task)
                → send_followup → close_worker
 ```
 
-18 tools cover the lifecycle: `list_models`, `runtime_info`, `create_worker`, `dispatch_task`, `wait_task`, `inspect_task`, `send_followup`, `cancel_task`, `close_worker`, `agy_history`, `open_dashboard`, `delete_task`, `clean_history`, plus compatibility tools (`agy_delegate`, `agy_status`, `agy_stop`, `agy_reset`, `agy_events`).
+The default `core` toolset exposes 12 tools: `list_models`, `runtime_info`, `create_worker`, `dispatch_task`, `wait_task`, `inspect_task`, `send_followup`, `cancel_task`, `close_worker`, `agy_history`, `agy_events`, and `open_dashboard`. Six legacy and maintenance tools (`agy_delegate`, `agy_status`, `agy_stop`, `agy_reset`, `clean_history`, `delete_task`) are not registered by default, which saves about 3,500 characters of controller context every turn. Restore all 18 with `AGY_TOOLSET=full` or `"toolset": "full"` in `~/.antigravity-bridge/config.json`; `runtime_info` reports the active `toolset`.
 
 You don't need to teach the host any of this: the bridge serves its own usage protocol through the MCP initialize instructions, generated from live configuration, so the orchestrator always follows the rules of the exact build it is running.
 
@@ -130,6 +130,7 @@ Most installs need only `allowed_roots` (above). Everything else is optional and
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `AGY_ALLOWED_ROOTS` | config file → user home | Allowed workspace roots, `;`-separated (Windows) or `:` (macOS/Linux). |
+| `AGY_TOOLSET` | config file `toolset` → `core` | `core` registers 12 tools; `full` also registers `agy_delegate`, `agy_status`, `agy_stop`, `agy_reset`, `clean_history`, `delete_task`. Env wins over the file. |
 | `AGY_ADD_DIRS` | config file `add_dirs` → none | Extra directories workers may read (`--add-dir`), same separator rules. Real paths only. |
 | `AGY_WORKER_RULES` | `on` | Append a short read-once / short-handoff contract to every job prompt; `off` sends the raw brief. |
 | `AGY_BIN` | auto-discovered | `agy` executable name or path. |
