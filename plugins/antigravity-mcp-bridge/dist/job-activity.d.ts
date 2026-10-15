@@ -33,6 +33,8 @@ export declare function withCommandTarget(entry: string, steps: readonly StepLik
 export declare function summarizeToolActivity(steps: readonly StepLike[]): ToolActivity;
 /** The agy stderr line explaining an auto-denied permission, when one was printed. */
 export declare function extractStderrHint(stderr: string): string | undefined;
+/** The permission named by agy's headless auto-deny stderr line (e.g. `command`), when one was printed. */
+export declare function stderrDeniedPermission(stderr: string): string | undefined;
 /** Best effort, never throws: the real path when a denied target is a symlink/junction alias of an allowed directory. */
 export declare function aliasRealPath(target: string, allowedDirs: readonly string[]): string | undefined;
 export interface WarningInput {

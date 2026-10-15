@@ -237,7 +237,6 @@ describe("per-job denied actions, tool activity and warnings", () => {
     expect(a.denied_actions).toEqual([`ViewFile (read_file): ${target}`]);
     expect(a.total_denied_actions).toBe(1);
     expect(a.warnings?.[0]).toContain("auto-denies permissions");
-    expect(a.warnings?.[0]).toContain("jetski: no output produced");
 
     const b = mgr.inspectTask(jobB);
     expect(b.denied_actions).toEqual([]);
@@ -247,8 +246,21 @@ describe("per-job denied actions, tool activity and warnings", () => {
     const c = mgr.inspectTask(jobC);
     expect(c.denied_actions).toEqual(['RunCommand (command): node -e "process.exit(0)"']);
     expect(c.total_denied_actions).toBe(1);
+    expect(c.warnings?.[0]).toContain("jetski: no output produced");
 
     expect(mgr.inspectTask(jobD).denied_actions).toEqual([]);
+  });
+
+  it("uses the stderr auto-deny line when a repeated denial does not grow agy's list", async () => {
+    const { mgr } = makeManager();
+    const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
+
+    await run(mgr, worker.workerId, "DENY_CMD");
+    const repeat = await run(mgr, worker.workerId, "DENY_CMD_REPEAT");
+
+    const detail = mgr.inspectTask(repeat);
+    expect(detail.denied_actions).toEqual(['RunCommand (command): node -e "process.exit(0)"']);
+    expect(detail.total_denied_actions).toBe(1);
   });
 
   it("reproduces the same per-job lists, tool activity and warnings after a restart", async () => {
