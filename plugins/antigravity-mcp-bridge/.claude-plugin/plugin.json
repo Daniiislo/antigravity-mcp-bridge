@@ -1,6 +1,6 @@
 {
   "name": "antigravity-mcp-bridge",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Local MCP bridge for coordinating persistent Antigravity CLI workers",
   "author": {
     "name": "Daniiislo"
