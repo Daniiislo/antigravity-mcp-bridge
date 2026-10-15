@@ -708,8 +708,15 @@ export class WorkerManager {
             for (const ev of liveEvents)
                 eventsMap.set(ev.cursor, ev);
             const mergedEvents = Array.from(eventsMap.values()).sort((a, b) => a.cursor - b.cursor);
+            // The dashboard conversation tab renders brief/effective_prompt from this
+            // endpoint. inspectTask only includes them when includePrompt is set (it is
+            // the compact MCP controller shape), so live jobs otherwise render as
+            // "(empty prompt)" while disk jobs (readDiskJob) always carry both fields.
+            // Mirror the disk bounds so live and historical jobs show identical text.
             return {
                 ...inspected,
+                brief: boundText(inMem.brief, 8_192) ?? "",
+                effective_prompt: boundText(inMem.effectivePrompt || inMem.brief, 16_384) ?? "",
                 events: mergedEvents
             };
         }

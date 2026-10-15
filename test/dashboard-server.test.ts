@@ -438,6 +438,22 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
       expect(htmlRes.body).toContain("function make(tag, className, textContent)");
       expect(htmlRes.body).toContain("elem.textContent = String(textContent);");
     });
+
+    it("exposes brief and effective_prompt for live in-memory jobs so the conversation tab never renders '(empty prompt)'", async () => {
+      const { mgr } = makeManager();
+      const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
+      const job = await mgr.dispatchTask(worker.workerId, "conversation prompt task");
+      await mgr.waitTask(job.jobId, { waitMs: 2_000 });
+
+      await mgr.getDashboardUrl();
+      const ds = mgr.getDashboardServer()!;
+      const res = await request({ port: ds.getPort()!, path: `/${ds.token}/api/jobs/${job.jobId}` });
+      expect(res.statusCode).toBe(200);
+      const data = JSON.parse(res.body);
+      // Live jobs must carry the same prompt fields the disk path (readDiskJob) does
+      expect(data.brief).toContain("conversation prompt task");
+      expect(data.effective_prompt).toContain("conversation prompt task");
+    });
   });
 
   describe("Snapshot, SSE Stream, Cursors, and Filtering", () => {
