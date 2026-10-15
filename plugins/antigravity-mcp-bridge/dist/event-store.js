@@ -2,6 +2,7 @@ import EventEmitter from "node:events";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { normalizeDeniedAction } from "./agy-protocol.js";
+import { addDeniedAction, stepDenial, summarizeToolActivity, withCommandTarget } from "./job-activity.js";
 export function boundText(text, maxChars = 32_768, suffix = " ... [truncated]") {
     if (text === undefined)
         return undefined;
@@ -475,6 +476,8 @@ export class EventStore extends EventEmitter {
             let lastProgress;
             const stepEvents = [];
             const deniedActions = [];
+            let stderrTail = "";
+            let untrustedDeniedBaseline = false;
             let usage;
             let cumulativeUsage;
             let hasModernCumulativeUsage = false;
@@ -557,13 +560,24 @@ export class EventStore extends EventEmitter {
                             finishedAt = d.finished_at || evt.timestamp;
                         }
                         if (Array.isArray(d.denied_actions)) {
+                            if (d.denied_actions_scope === "job") {
+                                // Authoritative per-job list recorded by the bridge: replaces what replay inferred.
+                                deniedActions.length = 0;
+                            }
                             for (const item of d.denied_actions) {
                                 const norm = normalizeDeniedAction(item);
-                                if (norm && !deniedActions.includes(norm)) {
+                                if (d.denied_actions_scope === "job")
+                                    addDeniedAction(deniedActions, norm);
+                                else if (norm && !deniedActions.includes(norm))
                                     deniedActions.push(norm);
-                                }
                             }
                         }
+                        if (d.untrusted_denied_baseline === true)
+                            untrustedDeniedBaseline = true;
+                    }
+                    else if (evt.eventType === "stderr") {
+                        if (typeof d.stderr === "string")
+                            stderrTail = (stderrTail + d.stderr).slice(-8_192);
                     }
                     else if (evt.eventType === "init" || evt.event === "init") {
                         lastActivityAt = evt.timestamp || lastActivityAt;
@@ -587,6 +601,9 @@ export class EventStore extends EventEmitter {
                                 deniedActions.push(norm);
                             }
                         }
+                        const stepNorm = stepDenial(d);
+                        if (stepNorm)
+                            addDeniedAction(deniedActions, stepNorm);
                     }
                     else if (evt.eventType === "result" || evt.event === "result" || evt.result) {
                         if (typeof d.conversation_id === "string")
@@ -617,14 +634,29 @@ export class EventStore extends EventEmitter {
                         if (d.usage)
                             cumulativeUsage = d.usage;
                         lastActivityAt = evt.timestamp || lastActivityAt;
-                        const resDenied = Array.isArray(d.denied_actions)
-                            ? d.denied_actions
-                            : (Array.isArray(d.deniedActions) ? d.deniedActions : undefined);
-                        if (resDenied) {
-                            for (const item of resDenied) {
+                        // agy's denied_actions is cumulative per conversation. Newer files record
+                        // this job's share as denied_delta; legacy files only carry the cumulative
+                        // list, which is the best available (possibly stale) evidence.
+                        if (d.denied_baseline_trusted === false && Array.isArray(d.denied_actions) && d.denied_actions.length > 0) {
+                            untrustedDeniedBaseline = true;
+                        }
+                        if (Array.isArray(d.denied_delta)) {
+                            for (const item of d.denied_delta) {
                                 const norm = normalizeDeniedAction(item);
-                                if (norm && !deniedActions.includes(norm)) {
-                                    deniedActions.push(norm);
+                                if (norm)
+                                    addDeniedAction(deniedActions, norm);
+                            }
+                        }
+                        else {
+                            const resDenied = Array.isArray(d.denied_actions)
+                                ? d.denied_actions
+                                : (Array.isArray(d.deniedActions) ? d.deniedActions : undefined);
+                            if (resDenied) {
+                                for (const item of resDenied) {
+                                    const norm = withCommandTarget(normalizeDeniedAction(item), stepEvents);
+                                    if (norm && !deniedActions.includes(norm)) {
+                                        deniedActions.push(norm);
+                                    }
                                 }
                             }
                         }
@@ -694,6 +726,9 @@ export class EventStore extends EventEmitter {
                 total_denied_actions: totalDenied,
                 denied_actions: slicedDenied,
                 has_more_denied_actions: hasMoreDenied,
+                tool_activity: summarizeToolActivity(stepEvents),
+                stderr_tail: stderrTail,
+                untrusted_denied_baseline: untrustedDeniedBaseline,
                 ...(usage ? { usage } : {}),
                 ...(cumulativeUsage ? { cumulative_usage: cumulativeUsage } : {}),
                 ...(result !== undefined ? { result: boundText(result, 32_768) } : {}),

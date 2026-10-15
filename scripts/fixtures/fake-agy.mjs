@@ -31,6 +31,15 @@ const conversationArgIndex = args.indexOf("--conversation");
 const resumedConversationId = conversationArgIndex >= 0 ? args[conversationArgIndex + 1] : undefined;
 const conversationId = resumedConversationId || `fake-${mode}-${process.pid}`;
 let turns = 0;
+// Real agy reports denied_actions cumulatively for the whole conversation.
+const cumulativeDenied = [];
+const USAGE = { input_tokens: 1, output_tokens: 1, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 2 };
+const emitStep = (step) => process.stdout.write(JSON.stringify({ event: "step_update", step_update: { conversation_id: conversationId, ...step } }) + "\n");
+const emitResult = (response) => process.stdout.write(JSON.stringify({ event: "result", result: {
+  conversation_id: conversationId, status: "SUCCESS", response,
+  ...(cumulativeDenied.length > 0 ? { denied_actions: [...cumulativeDenied] } : {}),
+  duration_seconds: 0.01, num_turns: turns, usage: USAGE
+} }) + "\n");
 
 process.stdout.write(JSON.stringify({ event: "init", conversation_id: conversationId, init: { cwd: process.cwd(), tools: [] } }) + "\n");
 
@@ -133,6 +142,39 @@ input.on("line", (line) => {
       duration_seconds: 0.01, num_turns: turns,
       usage: { input_tokens: 1, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 1 }
     } }) + "\n");
+    return;
+  }
+  if (typeof content === "string" && content.startsWith("DENY_READ:")) {
+    // A denied read: the tool step errors, and the cumulative result list grows.
+    const target = content.slice("DENY_READ:".length);
+    const message = `permission check failed for read_file "${target}": user denied permission for read_file(${target})\nDo not attempt to circumvent this denial.`;
+    process.stderr.write('jetski: no output produced - a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.\n');
+    emitStep({ step_index: 4, state: "ACTIVE", step_type: "tool", tool_name: "view_file", tool_info: { name: "view_file", parameters: { AbsolutePath: target } } });
+    emitStep({ step_index: 4, state: "ERROR", step_type: "tool", tool_name: "view_file", tool_info: { name: "view_file", parameters: { AbsolutePath: target }, error: { type: "TOOL_ERROR", message } } });
+    cumulativeDenied.push({ action: "read_file", display_name: "ViewFile" });
+    emitResult("Let me read the spec first.");
+    return;
+  }
+  if (content === "DENY_CMD") {
+    // A denied command shows no step error; only the result list grows.
+    emitStep({ step_index: 2, state: "DONE", step_type: "tool", tool_name: "run_command", tool_info: { name: "run_command", parameters: { CommandLine: "node -e \"process.exit(0)\"" } } });
+    cumulativeDenied.push({ action: "command", display_name: "RunCommand" });
+    emitResult("Running the check.");
+    return;
+  }
+  if (content === "CLEAN") {
+    emitStep({ step_index: 1, state: "DONE", step_type: "agent_response", text_delta: "ok" });
+    emitResult("clean turn");
+    return;
+  }
+  if (typeof content === "string" && content.startsWith("WRITE_FILE:")) {
+    const target = content.slice("WRITE_FILE:".length);
+    for (const state of ["ACTIVE", "DONE", "DONE"]) {
+      emitStep({ step_index: 2, state, step_type: "tool", tool_name: "write_to_file", tool_info: { name: "write_to_file", parameters: { TargetFile: target } } });
+    }
+    emitStep({ step_index: 3, state: "DONE", step_type: "tool", tool_name: "run_command", tool_info: { name: "run_command", parameters: { CommandLine: "echo ok" } } });
+    emitStep({ step_index: 4, state: "DONE", step_type: "tool", tool_name: "view_file", tool_info: { name: "view_file", parameters: { AbsolutePath: target } } });
+    emitResult("wrote the file");
     return;
   }
   if (content === "EMPTY_SUCCESS_WITH_DENIED") {

@@ -8,7 +8,17 @@ import { terminateProcessTree } from "./process-tree.js";
 export type AgyWorkerRawEvent =
   | { type: "init"; conversationId?: string | undefined; init?: { cwd?: string | undefined; tools?: string[] | undefined } | undefined }
   | { type: "step"; stepUpdate?: { step_index?: number | undefined; step_type?: string | undefined; state?: string | undefined; text_delta?: string | undefined; usage?: Partial<import("./agy-protocol.js").AgyUsage> | undefined; [k: string]: unknown } | undefined }
-  | { type: "result"; result: AgyTerminalResult }
+  | {
+      type: "result";
+      result: AgyTerminalResult;
+      /**
+       * agy reports denied_actions cumulatively per conversation. This is the
+       * part added by this turn (empty when the baseline is untrusted).
+       */
+      deniedDelta?: unknown[] | undefined;
+      /** False when the previous turn was interrupted, so the cumulative list cannot be attributed to this turn. */
+      deniedBaselineTrusted?: boolean | undefined;
+    }
   | { type: "stderr"; text: string };
 
 export interface AgyWorkerOptions {
@@ -126,6 +136,8 @@ export class AgyWorker {
   private terminating = false;
   private lastCumulativeUsage: import("./agy-protocol.js").AgyUsage | undefined;
   private usageBaselineTrusted = true;
+  private lastDeniedCount: number | undefined;
+  private deniedBaselineTrusted = true;
   private unsafeTerminationError: Error | undefined;
 
   constructor(private readonly options: AgyWorkerOptions) {}
@@ -303,7 +315,11 @@ export class AgyWorker {
     }
     if (event.event === "init") {
       if (event.conversation_id) {
-        if (this.conversationId && this.conversationId !== event.conversation_id) this.lastCumulativeUsage = undefined;
+        if (this.conversationId && this.conversationId !== event.conversation_id) {
+          this.lastCumulativeUsage = undefined;
+          this.lastDeniedCount = undefined;
+          this.deniedBaselineTrusted = true;
+        }
         this.conversationId = event.conversation_id;
       }
       this.resetInactivityTimer();
@@ -359,7 +375,14 @@ export class AgyWorker {
     }
     this.conversationId = result.conversation_id || this.conversationId;
     this.lastResult = result;
-    this.options.onRawEvent?.({ type: "result", result });
+    const deniedList = Array.isArray(result.denied_actions) ? result.denied_actions : [];
+    const deniedBaselineTrusted = this.deniedBaselineTrusted;
+    const deniedBaseline = this.lastDeniedCount ?? 0;
+    // A list shorter than the baseline means agy restarted its counter, so the whole list is new.
+    const deniedDelta = !deniedBaselineTrusted ? [] : (deniedList.length >= deniedBaseline ? deniedList.slice(deniedBaseline) : deniedList);
+    this.lastDeniedCount = deniedList.length;
+    this.deniedBaselineTrusted = true;
+    this.options.onRawEvent?.({ type: "result", result, deniedDelta, deniedBaselineTrusted });
     const cumulativeUsage = result.usage;
     const turnUsage = this.usageBaselineTrusted
       ? usageDelta(cumulativeUsage, this.lastCumulativeUsage)
@@ -426,6 +449,8 @@ export class AgyWorker {
     this.conversationId = undefined;
     this.lastCumulativeUsage = undefined;
     this.usageBaselineTrusted = true;
+    this.lastDeniedCount = undefined;
+    this.deniedBaselineTrusted = true;
   }
 
   private unsafeRestartError(): Error {
@@ -440,7 +465,10 @@ export class AgyWorker {
     this.pending = undefined;
     if (pending) this.clearPendingTimers(pending);
     if (!preserveConversation) this.clearConversation();
-    else if (pending && !terminalUsageObserved) this.usageBaselineTrusted = false;
+    else if (pending && !terminalUsageObserved) {
+      this.usageBaselineTrusted = false;
+      this.deniedBaselineTrusted = false;
+    }
     this.terminating = true;
 
     const work = (async () => {

@@ -439,6 +439,24 @@ describe("DashboardServer & Dashboard MCP Integration", () => {
       expect(htmlRes.body).toContain("elem.textContent = String(textContent);");
     });
 
+    it("exposes per-job warnings and renders them in the job detail", async () => {
+      const { mgr } = makeManager();
+      const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });
+      const job = await mgr.dispatchTask(worker.workerId, "DENY_CMD");
+      await mgr.waitTask(job.jobId, { waitMs: 2_000 });
+
+      await mgr.getDashboardUrl();
+      const ds = mgr.getDashboardServer()!;
+      const res = await request({ port: ds.getPort()!, path: `/${ds.token}/api/jobs/${job.jobId}` });
+      const data = JSON.parse(res.body);
+      expect(data.denied_actions).toEqual(['RunCommand (command): node -e "process.exit(0)"']);
+      expect(data.warnings[0]).toContain("auto-denies permissions");
+      expect(data.tool_activity.commands_run).toBe(1);
+
+      const htmlRes = await request({ port: ds.getPort()!, path: `/${ds.token}/` });
+      expect(htmlRes.body).toContain("detail-warnings-container");
+    });
+
     it("exposes brief and effective_prompt for live in-memory jobs so the conversation tab never renders '(empty prompt)'", async () => {
       const { mgr } = makeManager();
       const worker = await mgr.createWorker({ role: "implementer", workspace: process.cwd() });

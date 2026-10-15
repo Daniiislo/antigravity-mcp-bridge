@@ -21,6 +21,13 @@ export type AgyWorkerRawEvent = {
 } | {
     type: "result";
     result: AgyTerminalResult;
+    /**
+     * agy reports denied_actions cumulatively per conversation. This is the
+     * part added by this turn (empty when the baseline is untrusted).
+     */
+    deniedDelta?: unknown[] | undefined;
+    /** False when the previous turn was interrupted, so the cumulative list cannot be attributed to this turn. */
+    deniedBaselineTrusted?: boolean | undefined;
 } | {
     type: "stderr";
     text: string;
@@ -88,6 +95,8 @@ export declare class AgyWorker {
     private terminating;
     private lastCumulativeUsage;
     private usageBaselineTrusted;
+    private lastDeniedCount;
+    private deniedBaselineTrusted;
     private unsafeTerminationError;
     constructor(options: AgyWorkerOptions);
     delegate(task: string, timeouts?: number | DelegationTimeouts): Promise<DelegationResult>;

@@ -8,12 +8,15 @@ import { ModelCatalog } from "./model-catalog.js";
 import { DashboardServer } from "./dashboard-server.js";
 import { checkRequiredTools } from "./preflight.js";
 import { runtimeInfo } from "./runtime-info.js";
+import { addDeniedAction, buildJobWarnings, extractStderrHint, stepDenial, summarizeToolActivity, withCommandTarget } from "./job-activity.js";
 export class WorkerManager {
     config;
     prefixArgs;
     implicitWorkers = new Map();
     explicitWorkers = new Map();
     jobs = new Map();
+    /** Jobs whose previous wait was aborted by the host while still running. */
+    abortedWaits = new Set();
     requestHistory;
     eventStore;
     modelCatalog;
@@ -70,7 +73,7 @@ export class WorkerManager {
             "",
             "WORKFLOW",
             "1. list_models (refresh: true) before pinning any non-default model or effort on create_worker; pass only IDs that command printed. An invalid model fails the whole dispatch.",
-            "2. create_worker once per role (implementer edits; tester reviews in plan mode). One worker per role is enough; resume it for related fixes.",
+            "2. create_worker once per role (implementer edits; tester reviews by instruction: it is launched with --mode plan, which current agy ignores with slash commands disabled, so it is not an enforced read-only sandbox, and tester jobs that modify files get a warning). One worker per role is enough; resume it for related fixes.",
             "3. dispatch_task with a decision-complete brief. One coherent workstream per dispatch: size the brief so it finishes within the deadline. A fresh conversation also spends time reading files before editing. A dispatch warning says the brief bundles multiple workstreams: split follow-ups into separate jobs on the same worker (its conversation persists, so context is not lost). Splitting costs nothing; a deadline kill costs the whole turn.",
             "4. wait_task once per job; it stays pending until terminal. Never poll status or events while a wait is possible. Host tool timeout must exceed the job deadline.",
             "5. Accept a terminal result only when: status succeeded, response non-empty, no denied actions, and required verification actually ran. A SUCCESS with an empty response or denied actions is failure.",
@@ -238,7 +241,8 @@ export class WorkerManager {
             status: "queued",
             createdAt: new Date().toISOString(),
             stepEvents: [],
-            deniedActions: []
+            deniedActions: [],
+            stderrTail: ""
         };
         this.jobs.set(jobId, job);
         worker.queue.push(job);
@@ -386,6 +390,14 @@ export class WorkerManager {
             events: eventsRes?.events ?? []
         };
     }
+    /**
+     * True when a previous wait on this still-running job was aborted, i.e. the
+     * host gave up and asked again. Used to point at host timeout/code-mode config.
+     */
+    isRepeatedWait(jobId) {
+        const job = this.jobs.get(jobId);
+        return this.abortedWaits.has(jobId) && job !== undefined && (job.status === "queued" || job.status === "running");
+    }
     async waitTaskUntilTerminal(jobId, options) {
         const job = this.jobs.get(jobId);
         if (!job) {
@@ -419,7 +431,10 @@ export class WorkerManager {
                     if (evt.jobId === jobId && isTerminal())
                         finish(resolve);
                 };
-                const onAbort = () => finish(() => reject(this.waitAbortedError(jobId)));
+                const onAbort = () => finish(() => {
+                    this.abortedWaits.add(jobId);
+                    reject(this.waitAbortedError(jobId));
+                });
                 this.eventStore.on("event", onEvent);
                 signal?.addEventListener("abort", onAbort, { once: true });
                 // Close the check/register race if the job completed immediately
@@ -430,6 +445,7 @@ export class WorkerManager {
                     onAbort();
             });
         }
+        this.abortedWaits.delete(jobId);
         return { ...this.inspectTask(jobId), terminal: true };
     }
     waitAbortedError(jobId) {
@@ -487,6 +503,9 @@ export class WorkerManager {
             total_denied_actions: totalDenied,
             denied_actions: slicedDenied,
             has_more_denied_actions: hasMoreDenied,
+            tool_activity: summarizeToolActivity(job.stepEvents),
+            stderr_tail: job.stderrTail,
+            untrusted_denied_baseline: job.untrustedDeniedBaseline === true,
             ...(job.usage ? { usage: job.usage } : {}),
             ...(job.cumulativeUsage ? { cumulative_usage: job.cumulativeUsage } : {}),
             ...(job.result !== undefined ? { result: job.result } : {}),
@@ -496,7 +515,21 @@ export class WorkerManager {
     hasLiveJob(jobId) {
         return this.jobs.has(jobId);
     }
+    /** Warnings for one job's compact result, from per-job evidence plus the configured directories. */
+    jobWarnings(source) {
+        const stderrHint = source.stderr_tail ? extractStderrHint(source.stderr_tail) : undefined;
+        return buildJobWarnings({
+            role: source.role,
+            status: source.status,
+            deniedActions: source.denied_actions,
+            toolActivity: source.tool_activity,
+            stderrHint,
+            untrustedDeniedBaseline: source.untrusted_denied_baseline,
+            allowedDirs: [source.workspace, ...(this.config.addDirs ?? [])].filter(Boolean)
+        });
+    }
     compactInspection(source, options) {
+        const warnings = this.jobWarnings(source);
         const includePrompt = options.includePrompt === true;
         const includeSteps = options.includeSteps === true;
         const resultWasTruncated = (source.result?.length ?? 0) > 12_288;
@@ -507,6 +540,8 @@ export class WorkerManager {
             status: source.status, created_at: source.created_at, total_steps: source.total_steps,
             total_denied_actions: source.total_denied_actions, denied_actions: source.denied_actions.slice(0, 20),
             has_more_denied_actions: source.has_more_denied_actions,
+            ...(source.tool_activity ? { tool_activity: source.tool_activity } : {}),
+            ...(warnings.length > 0 ? { warnings } : {}),
             ...(source.started_at ? { started_at: source.started_at } : {}),
             ...(source.finished_at ? { finished_at: source.finished_at } : {}),
             ...(source.duration_seconds !== undefined ? { duration_seconds: source.duration_seconds } : {}),
@@ -724,8 +759,11 @@ export class WorkerManager {
         const diskJob = this.eventStore.readDiskJob(jobId, { stepLimit: 500 });
         if (diskJob) {
             const diskEvents = this.eventStore.readDiskJobEvents(jobId);
+            const { stderr_tail: _stderrTail, untrusted_denied_baseline: _untrusted, ...detail } = diskJob;
+            const warnings = this.jobWarnings(diskJob);
             return {
-                ...diskJob,
+                ...detail,
+                ...(warnings.length > 0 ? { warnings } : {}),
                 events: diskEvents
             };
         }
@@ -913,6 +951,10 @@ export class WorkerManager {
                         activeJob.deniedActions.push(norm);
                     }
                 }
+                // Real agy denials surface as a tool step whose error is a permission failure.
+                const stepNorm = stepDenial(stepUpdate);
+                if (stepNorm)
+                    addDeniedAction(activeJob.deniedActions, stepNorm);
             }
             this.eventStore.recordEvent({
                 eventType: "step",
@@ -926,21 +968,27 @@ export class WorkerManager {
                 if (raw.result.conversation_id) {
                     activeJob.conversationId = raw.result.conversation_id;
                 }
-                const deniedList = raw.result.denied_actions;
-                if (Array.isArray(deniedList)) {
-                    for (const item of deniedList) {
-                        const norm = normalizeDeniedAction(item);
-                        if (norm && !activeJob.deniedActions.includes(norm)) {
-                            activeJob.deniedActions.push(norm);
-                        }
-                    }
+                // agy's list is cumulative per conversation; only this turn's share belongs to the job.
+                const cumulative = raw.result.denied_actions;
+                const delta = raw.deniedDelta ?? (Array.isArray(cumulative) ? cumulative : []);
+                for (const item of delta) {
+                    const norm = withCommandTarget(normalizeDeniedAction(item), activeJob.stepEvents);
+                    if (norm)
+                        addDeniedAction(activeJob.deniedActions, norm);
+                }
+                if (raw.deniedBaselineTrusted === false && Array.isArray(cumulative) && cumulative.length > 0) {
+                    activeJob.untrustedDeniedBaseline = true;
                 }
             }
             this.eventStore.recordEvent({
                 eventType: "result",
                 workerId,
                 ...(jobId ? { jobId } : {}),
-                data: { ...raw.result }
+                data: {
+                    ...raw.result,
+                    // Per-job share of the cumulative denial list, so history replay matches live reporting.
+                    ...(activeJob ? { denied_delta: [...activeJob.deniedActions], denied_baseline_trusted: raw.deniedBaselineTrusted !== false } : {})
+                }
             });
         }
         else if (raw.type === "stderr") {
@@ -950,6 +998,8 @@ export class WorkerManager {
                 ...(jobId ? { jobId } : {}),
                 data: { stderr: raw.text }
             });
+            if (activeJob)
+                activeJob.stderrTail = (activeJob.stderrTail + raw.text).slice(-8_192);
         }
     }
     expireQueuedJob(worker, job) {
@@ -1027,7 +1077,9 @@ export class WorkerManager {
                             cumulative_usage: nextJob.cumulativeUsage,
                             response: nextJob.result,
                             conversation_id: nextJob.conversationId,
-                            denied_actions: [...nextJob.deniedActions]
+                            denied_actions: [...nextJob.deniedActions],
+                            denied_actions_scope: "job",
+                            ...(nextJob.untrustedDeniedBaseline ? { untrusted_denied_baseline: true } : {})
                         }
                     });
                 }
@@ -1054,7 +1106,9 @@ export class WorkerManager {
                             error: nextJob.error,
                             ...(nextJob.timeoutKind ? { timeout_kind: nextJob.timeoutKind } : {}),
                             ...(nextJob.budgetKind ? { budget_kind: nextJob.budgetKind } : {}),
-                            denied_actions: [...nextJob.deniedActions]
+                            denied_actions: [...nextJob.deniedActions],
+                            denied_actions_scope: "job",
+                            ...(nextJob.untrustedDeniedBaseline ? { untrusted_denied_baseline: true } : {})
                         }
                     });
                 }

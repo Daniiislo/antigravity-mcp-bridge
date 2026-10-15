@@ -47,6 +47,8 @@ export class AgyWorker {
     terminating = false;
     lastCumulativeUsage;
     usageBaselineTrusted = true;
+    lastDeniedCount;
+    deniedBaselineTrusted = true;
     unsafeTerminationError;
     constructor(options) {
         this.options = options;
@@ -239,8 +241,11 @@ export class AgyWorker {
         }
         if (event.event === "init") {
             if (event.conversation_id) {
-                if (this.conversationId && this.conversationId !== event.conversation_id)
+                if (this.conversationId && this.conversationId !== event.conversation_id) {
                     this.lastCumulativeUsage = undefined;
+                    this.lastDeniedCount = undefined;
+                    this.deniedBaselineTrusted = true;
+                }
                 this.conversationId = event.conversation_id;
             }
             this.resetInactivityTimer();
@@ -297,7 +302,14 @@ export class AgyWorker {
         }
         this.conversationId = result.conversation_id || this.conversationId;
         this.lastResult = result;
-        this.options.onRawEvent?.({ type: "result", result });
+        const deniedList = Array.isArray(result.denied_actions) ? result.denied_actions : [];
+        const deniedBaselineTrusted = this.deniedBaselineTrusted;
+        const deniedBaseline = this.lastDeniedCount ?? 0;
+        // A list shorter than the baseline means agy restarted its counter, so the whole list is new.
+        const deniedDelta = !deniedBaselineTrusted ? [] : (deniedList.length >= deniedBaseline ? deniedList.slice(deniedBaseline) : deniedList);
+        this.lastDeniedCount = deniedList.length;
+        this.deniedBaselineTrusted = true;
+        this.options.onRawEvent?.({ type: "result", result, deniedDelta, deniedBaselineTrusted });
         const cumulativeUsage = result.usage;
         const turnUsage = this.usageBaselineTrusted
             ? usageDelta(cumulativeUsage, this.lastCumulativeUsage)
@@ -364,6 +376,8 @@ export class AgyWorker {
         this.conversationId = undefined;
         this.lastCumulativeUsage = undefined;
         this.usageBaselineTrusted = true;
+        this.lastDeniedCount = undefined;
+        this.deniedBaselineTrusted = true;
     }
     unsafeRestartError() {
         return new Error(`Antigravity worker is unsafe to restart after unconfirmed process-tree termination; close it and create a new worker. ${this.unsafeTerminationError?.message ?? ""}`.trim());
@@ -379,8 +393,10 @@ export class AgyWorker {
             this.clearPendingTimers(pending);
         if (!preserveConversation)
             this.clearConversation();
-        else if (pending && !terminalUsageObserved)
+        else if (pending && !terminalUsageObserved) {
             this.usageBaselineTrusted = false;
+            this.deniedBaselineTrusted = false;
+        }
         this.terminating = true;
         const work = (async () => {
             let rejection = error;

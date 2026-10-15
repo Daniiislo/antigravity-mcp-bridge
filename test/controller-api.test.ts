@@ -981,7 +981,7 @@ describe("Controller API (Tasks 5-7)", () => {
         expect(structured.events).toBeUndefined();
 
         const textContent = (res.content as Array<any>)[0].text;
-        expect(textContent).toBe(`Job ${job.jobId} finished with status succeeded. Compact result included; do not call inspect_task unless diagnostics are needed.`);
+        expect(textContent).toBe(`Job ${job.jobId} finished with status succeeded - 1 warning(s): Implementer finished without changing any file; verify the response before accepting it.. Compact result included; do not call inspect_task unless diagnostics are needed.`);
       } finally {
         await client.close();
         await server.close();

@@ -4,6 +4,7 @@ import { type BridgeConfig, type Role } from "./config.js";
 import { type CleanJobsOptions, type CleanJobsResult, type JobHistorySummary, type NormalizedEvent } from "./event-store.js";
 import { type ListModelsResult } from "./model-catalog.js";
 import { DashboardServer } from "./dashboard-server.js";
+import { type ToolActivity } from "./job-activity.js";
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled" | "orphaned";
 export interface DispatchOptions {
     requestKey?: string | undefined;
@@ -75,6 +76,10 @@ export interface JobRecord {
         [k: string]: unknown;
     }>;
     deniedActions: string[];
+    /** Bounded tail of agy stderr seen during this job; source of the auto-denial hint. */
+    stderrTail: string;
+    /** True when agy's cumulative denial list could not be attributed to this job. */
+    untrustedDeniedBaseline?: boolean | undefined;
 }
 export interface WaitTaskResult {
     job_id: string;
@@ -130,6 +135,10 @@ export interface InspectTaskResult {
     total_denied_actions: number;
     denied_actions: string[];
     has_more_denied_actions: boolean;
+    /** What the job's tool steps did; derived from step events. */
+    tool_activity?: ToolActivity | undefined;
+    /** Attention signals; never change the job status. */
+    warnings?: string[] | undefined;
     usage?: AgyUsage | undefined;
     cumulative_usage?: AgyUsage | undefined;
     result?: string | undefined;
@@ -144,6 +153,8 @@ export declare class WorkerManager {
     private readonly implicitWorkers;
     private readonly explicitWorkers;
     private readonly jobs;
+    /** Jobs whose previous wait was aborted by the host while still running. */
+    private readonly abortedWaits;
     private requestHistory?;
     private readonly eventStore;
     private readonly modelCatalog;
@@ -199,12 +210,19 @@ export declare class WorkerManager {
         waitMs?: number | undefined;
         afterCursor?: number | undefined;
     }): Promise<WaitTaskResult>;
+    /**
+     * True when a previous wait on this still-running job was aborted, i.e. the
+     * host gave up and asked again. Used to point at host timeout/code-mode config.
+     */
+    isRepeatedWait(jobId: string): boolean;
     waitTaskUntilTerminal(jobId: string, options?: {
         signal?: AbortSignal | undefined;
     }): Promise<TerminalTaskResult>;
     private waitAbortedError;
     inspectTask(jobId: string, options?: InspectTaskOptions): InspectTaskResult;
     hasLiveJob(jobId: string): boolean;
+    /** Warnings for one job's compact result, from per-job evidence plus the configured directories. */
+    private jobWarnings;
     private compactInspection;
     private elapsedSeconds;
     cancelTask(jobId: string): Promise<{
