@@ -138,6 +138,8 @@ describe("Agent Plugins Manifests", () => {
     // marketplace installs resolve workspace roots from the per-user config
     // file (~/.antigravity-bridge/config.json) or the env variable instead.
     expect(server.env?.AGY_ALLOWED_ROOTS).toBeUndefined();
+    // The Codex host default (300 s) would cut wait_task short of the 1800 s job budget.
+    expect(server.tool_timeout_sec).toBeGreaterThan(Number(server.env?.AGY_MAX_TURN_SECONDS ?? 1800));
   });
 
   it("marketplace.json is portable: relative plugin path, installable from any clone", () => {

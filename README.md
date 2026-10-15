@@ -119,6 +119,31 @@ Most installs need only `allowed_roots` (above). Everything else is optional and
 
 **Where to set them:** in your MCP server entry (`env` block of the plugin's `.mcp.json`, or the host's MCP config for manual registrations). The server does not load `.env` files. Full list with validation rules: [docs/advanced.md](docs/advanced.md#configuration-reference).
 
+## Host configuration (Codex)
+
+Jobs can run for many minutes, so two Codex settings decide whether `wait_task` behaves as one cheap pending call or as an expensive polling loop. Add both to your Codex `config.toml`:
+
+```toml
+# Let Codex call the bridge tools directly instead of wrapping them in its code-mode `exec`.
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__antigravity_bridge"]
+
+# Must exceed the longest job: AGY_MAX_TURN_SECONDS (default 1800) plus cleanup margin.
+[mcp_servers.antigravity-bridge]
+tool_timeout_sec = 3600
+```
+
+The namespace is `mcp__` plus your server name with non-alphanumeric characters replaced by `_` (`antigravity-bridge` becomes `mcp__antigravity_bridge`). If you registered the server under another name, use that name in both tables.
+
+Why they matter:
+
+- **Code-mode wrapping.** When the bridge namespace is not direct-only, Codex wraps tool calls in its code-mode `exec` tool, and the model ends up polling. Each poll costs a full model turn, so a long job can burn a large share of the controller's tokens.
+- **Tool timeout.** Codex's default MCP tool timeout is 300 seconds, which cuts `wait_task` short while the job is still running. The bridge's own deadline (`AGY_MAX_TURN_SECONDS`) is much longer, so keep `tool_timeout_sec` above it.
+
+The Codex plugin manifest ships `tool_timeout_sec = 3600` for plugin installs. A server added with `codex mcp add` (or `npm run register:codex`) cannot set it from the command line, so add it to `config.toml` yourself; the installer prints these lines after registering.
+
+To verify, run one job and check the host's event log: there should be a single `wait_task` call for the job and no `exec` wrapper around bridge calls. If the bridge sees a second `wait_task` for a job whose previous wait was cut short, its response includes a hint pointing back to this section.
+
 ## Other MCP hosts
 
 Any host can run the server from a clone — the repo ships prebuilt artifacts:
