@@ -50,7 +50,7 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
     title: "Create Antigravity Worker",
     description: "Create an isolated Antigravity worker process with role, workspace, and optional constraints.",
     inputSchema: z.object({
-      role: roleSchema.describe("Implementer starts in accept-edits mode; tester starts in plan mode"),
+      role: roleSchema.describe("Implementer starts in accept-edits mode; tester is launched with --mode plan, which current agy ignores while slash commands are disabled, so the tester role is advisory (review only by instruction), not an enforced read-only sandbox"),
       workspace: z.string().min(1).describe("Workspace directory inside AGY_ALLOWED_ROOTS"),
       required_tools: z.array(z.string().min(1).max(64)).max(16).optional().describe("Task-specific executable names to preflight without launching AGY; module/package availability still needs native verification"),
       model: z.string().optional().describe("Optional model override"),
@@ -110,8 +110,15 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
     })
   }, async ({ job_id }, context) => {
     try {
+      const repeated = manager.isRepeatedWait(job_id);
       const result = await manager.waitTaskUntilTerminal(job_id, { signal: context.mcpReq.signal });
-      const summary = `Job ${result.job_id} finished with status ${result.status}. Compact result included; do not call inspect_task unless diagnostics are needed.`;
+      const warned = result.warnings && result.warnings.length > 0
+        ? ` - ${result.warnings.length} warning(s): ${result.warnings.join(" ")}`
+        : "";
+      const hint = repeated
+        ? " Hint: a previous wait on this job was cut short by the host; check the README \"Host configuration\" section (host tool timeout and code-mode wrapping)."
+        : "";
+      const summary = `Job ${result.job_id} finished with status ${result.status}${warned}. Compact result included; do not call inspect_task unless diagnostics are needed.${hint}`;
       return success(result, summary);
     } catch (error) {
       return failure(error);
@@ -332,7 +339,7 @@ export function createServer(manager: WorkerManager): TaskAwareServer {
     title: "Delegate to Antigravity",
     description: "Send one bounded task to a persistent Antigravity implementer or tester conversation.",
     inputSchema: z.object({
-      role: roleSchema.describe("Implementer may edit; tester is started in plan mode"),
+      role: roleSchema.describe("Implementer may edit; tester is launched with --mode plan (advisory: current agy ignores it with slash commands disabled)"),
       task: z.string().min(1).describe("Decision-complete task or review brief"),
       cwd: z.string().min(1).describe("Existing workspace directory inside AGY_ALLOWED_ROOTS"),
       timeoutSeconds: z.number().positive().max(86_400).optional()

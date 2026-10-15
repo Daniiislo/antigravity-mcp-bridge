@@ -25,6 +25,21 @@ Use optional `request_key` for uncertain retries with exactly the same worker, b
 - The dashboard binds strictly to `127.0.0.1`, enforces per-process bearer tokens, validates `Host` headers against DNS rebinding, serves strict CSP headers, and uses safe DOM text APIs with zero external assets.
 - Runtime logs, scratch files, dependencies, build output, and secrets are excluded from Git.
 
+## Attention signals on job results
+
+`wait_task`, `inspect_task`, history reads, and the dashboard add three optional fields to a job's compact result. None of them changes the job `status`.
+
+- `denied_actions` / `total_denied_actions` list only denials that happened during that job. Antigravity reports `denied_actions` cumulatively per conversation, so the bridge keeps a per-worker baseline and attributes just the new entries; the baseline resets when the conversation changes. After a timeout or crash the next result cannot be attributed, so only step-level denials (a tool step whose error is a permission failure) are reported and a warning says so. Entries name the target when known, for example `ViewFile (read_file): <path>` or `RunCommand (command): <command line>`. Run history written by older versions only has the cumulative list and may still show stale entries.
+- `tool_activity` is `{ tool_calls, files_changed, commands_run, tool_errors }`, counting each tool step once (`files_changed` holds up to 20 unique paths from file-writing tools).
+- `warnings` is a list of plain-text attention signals, repeated in the `wait_task` summary line:
+  - Denied actions: headless Antigravity auto-denies permissions it cannot prompt for and the turn often ends early. Reads outside the workspace need an [`add_dirs`](../README.md#optional-extra-readable-directories-add_dirs) entry using the real path (a symlink or junction alias is denied because Antigravity checks the literal path; the warning names the real path when it can tell). Commands need an allow rule in Antigravity's own settings (`permissions.allow`). The Antigravity stderr hint is included when one was printed.
+  - An implementer job that succeeded without any file-changing tool call: verify the response before accepting it.
+  - A tester job that modified files (see below).
+
+### Tester mode
+
+Testers are launched with `--mode plan`. Current `agy` prints `warning: --mode plan has no effect while slash command expansion is disabled.`, and the bridge keeps slash commands disabled, so the flag does nothing. In testing with agy 1.3.5, even with plan mode honored a tester could still run commands and create files when the prompt asks for it, and omitting `--mode` behaves the same, so the tester role is review-only by instruction, not an enforced read-only sandbox. Use `constraints` on `create_worker` to state the rule, and treat the tester-modified-files warning as a signal to review the diff.
+
 ## Token conservation for controllers
 
 - **Prefer negotiated MCP Tasks:** the bridge advertises the official `io.modelcontextprotocol/tasks` extension. A compatible host receives a durable task handle from `dispatch_task`, observes it outside the model turn, and gets the compact final result from `tasks/get`. This removes model-driven `wait_task` and `inspect_task` calls.

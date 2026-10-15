@@ -373,6 +373,17 @@ export function getDashboardHtml(token) {
       gap: 6px;
     }
 
+    .warning-alert {
+      background: rgba(229, 165, 10, 0.12);
+      border: 1px solid rgba(229, 165, 10, 0.4);
+      border-radius: 4px;
+      padding: 6px 10px;
+      font-size: 11.5px;
+      color: var(--text-main);
+      flex-direction: column;
+      gap: 4px;
+    }
+
     /* Tabs Bar */
     .tabs-bar {
       background: var(--bg-surface);
@@ -831,6 +842,7 @@ export function getDashboardHtml(token) {
           <div id="detail-denied-container" class="denied-alert" style="display: none;">
             <strong>Denied Actions:</strong> <span id="detail-denied-list"></span>
           </div>
+          <div id="detail-warnings-container" class="warning-alert" style="display: none;"></div>
         </div>
 
         <nav class="tabs-bar">
@@ -1308,6 +1320,17 @@ export function getDashboardHtml(token) {
           deniedList.textContent = job.denied_actions.join(", ");
         } else {
           deniedContainer.style.display = "none";
+        }
+
+        const warningsContainer = document.getElementById("detail-warnings-container");
+        clearNode(warningsContainer);
+        if (Array.isArray(job.warnings) && job.warnings.length > 0) {
+          warningsContainer.style.display = "flex";
+          for (const warning of job.warnings) {
+            warningsContainer.appendChild(make("div", "warning-line", "Warning: " + warning));
+          }
+        } else {
+          warningsContainer.style.display = "none";
         }
 
         renderConversationTab(job);

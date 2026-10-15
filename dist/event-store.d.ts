@@ -1,5 +1,6 @@
 import EventEmitter from "node:events";
 import { type AgyUsage } from "./agy-protocol.js";
+import { type ToolActivity } from "./job-activity.js";
 export declare function boundText(text: string | undefined, maxChars?: number, suffix?: string): string | undefined;
 export declare function sanitizeAggregate(val: unknown, depth?: number, currentChars?: {
     count: number;
@@ -129,6 +130,10 @@ export declare class EventStore extends EventEmitter {
         total_denied_actions: number;
         denied_actions: string[];
         has_more_denied_actions: boolean;
+        tool_activity: ToolActivity;
+        /** Replay evidence consumed by the warning builder; not part of the controller payload. */
+        stderr_tail: string;
+        untrusted_denied_baseline: boolean;
         usage?: AgyUsage | undefined;
         cumulative_usage?: AgyUsage | undefined;
         result?: string | undefined;

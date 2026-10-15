@@ -2,6 +2,7 @@ import EventEmitter from "node:events";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { normalizeDeniedAction, type AgyUsage } from "./agy-protocol.js";
+import { addDeniedAction, stepDenial, summarizeToolActivity, withCommandTarget, type ToolActivity } from "./job-activity.js";
 
 export function boundText(
   text: string | undefined,
@@ -574,6 +575,10 @@ export class EventStore extends EventEmitter {
     total_denied_actions: number;
     denied_actions: string[];
     has_more_denied_actions: boolean;
+    tool_activity: ToolActivity;
+    /** Replay evidence consumed by the warning builder; not part of the controller payload. */
+    stderr_tail: string;
+    untrusted_denied_baseline: boolean;
     usage?: AgyUsage | undefined;
     cumulative_usage?: AgyUsage | undefined;
     result?: string | undefined;
@@ -616,6 +621,8 @@ export class EventStore extends EventEmitter {
         [k: string]: unknown;
       }> = [];
       const deniedActions: string[] = [];
+      let stderrTail = "";
+      let untrustedDeniedBaseline = false;
       let usage: AgyUsage | undefined;
       let cumulativeUsage: AgyUsage | undefined;
       let hasModernCumulativeUsage = false;
@@ -672,13 +679,19 @@ export class EventStore extends EventEmitter {
               finishedAt = (d.finished_at as string) || evt.timestamp;
             }
             if (Array.isArray(d.denied_actions)) {
+              if (d.denied_actions_scope === "job") {
+                // Authoritative per-job list recorded by the bridge: replaces what replay inferred.
+                deniedActions.length = 0;
+              }
               for (const item of d.denied_actions) {
                 const norm = normalizeDeniedAction(item);
-                if (norm && !deniedActions.includes(norm)) {
-                  deniedActions.push(norm);
-                }
+                if (d.denied_actions_scope === "job") addDeniedAction(deniedActions, norm);
+                else if (norm && !deniedActions.includes(norm)) deniedActions.push(norm);
               }
             }
+            if (d.untrusted_denied_baseline === true) untrustedDeniedBaseline = true;
+          } else if (evt.eventType === "stderr") {
+            if (typeof d.stderr === "string") stderrTail = (stderrTail + d.stderr).slice(-8_192);
           } else if (evt.eventType === "init" || evt.event === "init") {
             lastActivityAt = evt.timestamp || lastActivityAt;
             if (typeof d.conversation_id === "string") conversationId = d.conversation_id;
@@ -700,6 +713,8 @@ export class EventStore extends EventEmitter {
                 deniedActions.push(norm);
               }
             }
+            const stepNorm = stepDenial(d);
+            if (stepNorm) addDeniedAction(deniedActions, stepNorm);
           } else if (evt.eventType === "result" || evt.event === "result" || evt.result) {
             if (typeof d.conversation_id === "string") conversationId = d.conversation_id;
             else if (typeof evt.conversation_id === "string") conversationId = evt.conversation_id;
@@ -722,14 +737,27 @@ export class EventStore extends EventEmitter {
             if (d.usage) cumulativeUsage = d.usage as AgyUsage;
             lastActivityAt = evt.timestamp || lastActivityAt;
 
-            const resDenied = Array.isArray(d.denied_actions)
-              ? d.denied_actions
-              : (Array.isArray(d.deniedActions) ? d.deniedActions : undefined);
-            if (resDenied) {
-              for (const item of resDenied) {
+            // agy's denied_actions is cumulative per conversation. Newer files record
+            // this job's share as denied_delta; legacy files only carry the cumulative
+            // list, which is the best available (possibly stale) evidence.
+            if (d.denied_baseline_trusted === false && Array.isArray(d.denied_actions) && d.denied_actions.length > 0) {
+              untrustedDeniedBaseline = true;
+            }
+            if (Array.isArray(d.denied_delta)) {
+              for (const item of d.denied_delta) {
                 const norm = normalizeDeniedAction(item);
-                if (norm && !deniedActions.includes(norm)) {
-                  deniedActions.push(norm);
+                if (norm) addDeniedAction(deniedActions, norm);
+              }
+            } else {
+              const resDenied = Array.isArray(d.denied_actions)
+                ? d.denied_actions
+                : (Array.isArray(d.deniedActions) ? d.deniedActions : undefined);
+              if (resDenied) {
+                for (const item of resDenied) {
+                  const norm = withCommandTarget(normalizeDeniedAction(item), stepEvents);
+                  if (norm && !deniedActions.includes(norm)) {
+                    deniedActions.push(norm);
+                  }
                 }
               }
             }
@@ -801,6 +829,9 @@ export class EventStore extends EventEmitter {
         total_denied_actions: totalDenied,
         denied_actions: slicedDenied,
         has_more_denied_actions: hasMoreDenied,
+        tool_activity: summarizeToolActivity(stepEvents),
+        stderr_tail: stderrTail,
+        untrusted_denied_baseline: untrustedDeniedBaseline,
         ...(usage ? { usage } : {}),
         ...(cumulativeUsage ? { cumulative_usage: cumulativeUsage } : {}),
         ...(result !== undefined ? { result: boundText(result, 32_768) } : {}),
