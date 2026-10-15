@@ -145,6 +145,10 @@ export function extractStderrHint(stderr) {
 function samePath(a, b) {
     return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
+/** The permission named by agy's headless auto-deny stderr line (e.g. `command`), when one was printed. */
+export function stderrDeniedPermission(stderr) {
+    return /required the "([\w-]+)" permission[^\n]*auto-denied/i.exec(stderr)?.[1];
+}
 function isUnder(candidate, dir) {
     const relative = path.relative(dir, candidate);
     return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));

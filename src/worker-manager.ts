@@ -16,7 +16,7 @@ import { ModelCatalog, type ListModelsResult } from "./model-catalog.js";
 import { DashboardServer } from "./dashboard-server.js";
 import { checkRequiredTools } from "./preflight.js";
 import { runtimeInfo } from "./runtime-info.js";
-import { addDeniedAction, buildJobWarnings, extractStderrHint, stepDenial, summarizeToolActivity, withCommandTarget, type ToolActivity } from "./job-activity.js";
+import { addDeniedAction, buildJobWarnings, extractStderrHint, stderrDeniedPermission, stepDenial, summarizeToolActivity, withCommandTarget, type ToolActivity } from "./job-activity.js";
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled" | "orphaned";
 
@@ -1249,6 +1249,13 @@ export class WorkerManager {
         for (const item of delta) {
           const norm = withCommandTarget(normalizeDeniedAction(item), activeJob.stepEvents);
           if (norm) addDeniedAction(activeJob.deniedActions, norm);
+        }
+        // A repeated denial of the same kind may not grow agy's cumulative list; the
+        // headless auto-deny stderr line still names the permission for this turn.
+        const hinted = stderrDeniedPermission(activeJob.stderrTail);
+        if (hinted && !activeJob.deniedActions.some((entry) => entry.includes(`(${hinted})`))) {
+          const hintedEntry = normalizeDeniedAction({ display_name: hinted === "command" ? "RunCommand" : hinted, action: hinted });
+          addDeniedAction(activeJob.deniedActions, withCommandTarget(hintedEntry, activeJob.stepEvents));
         }
         if (raw.deniedBaselineTrusted === false && Array.isArray(cumulative) && cumulative.length > 0) {
           activeJob.untrustedDeniedBaseline = true;

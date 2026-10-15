@@ -148,17 +148,19 @@ input.on("line", (line) => {
     // A denied read: the tool step errors, and the cumulative result list grows.
     const target = content.slice("DENY_READ:".length);
     const message = `permission check failed for read_file "${target}": user denied permission for read_file(${target})\nDo not attempt to circumvent this denial.`;
-    process.stderr.write('jetski: no output produced - a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.\n');
     emitStep({ step_index: 4, state: "ACTIVE", step_type: "tool", tool_name: "view_file", tool_info: { name: "view_file", parameters: { AbsolutePath: target } } });
     emitStep({ step_index: 4, state: "ERROR", step_type: "tool", tool_name: "view_file", tool_info: { name: "view_file", parameters: { AbsolutePath: target }, error: { type: "TOOL_ERROR", message } } });
     cumulativeDenied.push({ action: "read_file", display_name: "ViewFile" });
     emitResult("Let me read the spec first.");
     return;
   }
-  if (content === "DENY_CMD") {
-    // A denied command shows no step error; only the result list grows.
+  if (content === "DENY_CMD" || content === "DENY_CMD_REPEAT") {
+    // A denied command shows no step error; the result list grows and headless agy
+    // explains the auto-denial on stderr. A repeat of an already-listed kind may not
+    // grow the cumulative list, so only stderr names it.
+    process.stderr.write('jetski: no output produced - a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.\n');
     emitStep({ step_index: 2, state: "DONE", step_type: "tool", tool_name: "run_command", tool_info: { name: "run_command", parameters: { CommandLine: "node -e \"process.exit(0)\"" } } });
-    cumulativeDenied.push({ action: "command", display_name: "RunCommand" });
+    if (content === "DENY_CMD") cumulativeDenied.push({ action: "command", display_name: "RunCommand" });
     emitResult("Running the check.");
     return;
   }
