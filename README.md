@@ -117,7 +117,7 @@ Most installs need only `allowed_roots` (above). Everything else is optional and
 | `AGY_RUNS_DIR` | per-user state dir | Where NDJSON run history is stored. |
 | `AGY_DASHBOARD_ENABLED` | `true` | Local read-only dashboard. |
 
-**Where to set them:** in your MCP server entry (`env` block of the plugin's `.mcp.json`, or the host's MCP config for manual registrations). The server does not load `.env` files. Full list with validation rules: [docs/advanced.md](docs/advanced.md#configuration-reference).
+**Where to set them:** in your MCP server entry (`env` block of the plugin's `.mcp.json` for Codex or `.mcp.claude.json` for Claude Code, or the host's MCP config for manual registrations). The server does not load `.env` files. Full list with validation rules: [docs/advanced.md](docs/advanced.md#configuration-reference).
 
 ## Host configuration (Codex)
 

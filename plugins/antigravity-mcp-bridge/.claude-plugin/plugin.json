@@ -15,5 +15,5 @@
     "codex",
     "claude"
   ],
-  "mcpServers": "./.mcp.json"
+  "mcpServers": "./.mcp.claude.json"
 }
