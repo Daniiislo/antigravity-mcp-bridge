@@ -234,7 +234,7 @@ export function buildCodexRegistration(options: BuildRegistrationOptions = {}): 
 export function codexHostConfigHint(name: string, toolTimeoutSeconds = 3600): string[] {
   return [
     `Next step: raise the Codex tool timeout for "${name}" so long jobs are not cut off at the 300 s default.`,
-    `Add this to your Codex config.toml:`,
+    `Add the key to the existing server table in your Codex config.toml:`,
     `  [mcp_servers.${name}]`,
     `  tool_timeout_sec = ${toolTimeoutSeconds}`,
     "To avoid model-driven polling, also list the server's tool namespace as direct-only:",
