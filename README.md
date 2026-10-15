@@ -27,6 +27,13 @@ codex plugin marketplace add Daniiislo/antigravity-mcp-bridge --ref main
 codex plugin add antigravity-mcp-bridge
 ```
 
+Then add one setting to your Codex `config.toml` (keep any namespaces already in the list). Without it Codex may wrap bridge calls in its code-mode `exec` and make the model poll, which is the largest avoidable token cost ([why](#host-configuration)):
+
+```toml
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__antigravity_bridge"]
+```
+
 **Claude Code:**
 
 ```bash
@@ -98,6 +105,20 @@ create_worker → dispatch_task → (host observes completion via MCP Task)
 
 You don't need to teach the host any of this: the bridge serves its own usage protocol through the MCP initialize instructions, generated from live configuration, so the orchestrator always follows the rules of the exact build it is running.
 
+### Keep controllers cheap
+
+Every controller turn re-sends the whole conversation, so fewer turns matter more than shorter answers.
+
+- Pass `wait: true` to `dispatch_task` / `send_followup` when nothing else runs in parallel: one controller turn per job instead of two. Otherwise call `wait_task` once per job and never poll.
+- Batch one coherent workstream per job; many micro-jobs each cost controller turns.
+- Read `warnings` and `tool_activity` on the result instead of re-inspecting the job: they flag denied actions, an implementer that changed no file, and a tester that edited files.
+- Workers are told to read files once and end with a short handoff; set `AGY_WORKER_RULES=off` to disable that.
+- If the bridge detects a likely misconfiguration of the host (see [Host configuration](#host-configuration)), `runtime_info` lists it under `host_warnings` and the first dispatch response repeats it once.
+
+### Worker permissions
+
+Headless `agy` cannot prompt, so it auto-denies any tool permission it has not been granted (the job result then carries a warning naming the denied action). To pre-approve a specific command, add an allow rule to Antigravity's own `settings.json` under `permissions.allow`, using agy's rule form `command(<target>)`; agy's changelog places the global file at `<your-home>/.gemini/antigravity-cli/settings.json`. Headless runs honor that file. Keep rules narrow; `--dangerously-skip-permissions` is deliberately never used by the bridge. Reads outside the workspace use `add_dirs` instead (see above).
+
 ### Dashboard
 
 Say *"open dashboard"* in the host, or run `npm run dashboard` from a clone. Local loopback only, per-process token, strict CSP, zero external assets.
@@ -110,6 +131,7 @@ Most installs need only `allowed_roots` (above). Everything else is optional and
 | --- | --- | --- |
 | `AGY_ALLOWED_ROOTS` | config file → user home | Allowed workspace roots, `;`-separated (Windows) or `:` (macOS/Linux). |
 | `AGY_ADD_DIRS` | config file `add_dirs` → none | Extra directories workers may read (`--add-dir`), same separator rules. Real paths only. |
+| `AGY_WORKER_RULES` | `on` | Append a short read-once / short-handoff contract to every job prompt; `off` sends the raw brief. |
 | `AGY_BIN` | auto-discovered | `agy` executable name or path. |
 | `AGY_MAX_TURN_SECONDS` | `1800` | Absolute per-job wall-clock cap. |
 | `AGY_DEFAULT_INACTIVITY_TIMEOUT_SECONDS` | `300` | Stop a worker after this long without progress. |
@@ -119,7 +141,11 @@ Most installs need only `allowed_roots` (above). Everything else is optional and
 
 **Where to set them:** in your MCP server entry (`env` block of the plugin's `.mcp.json` for Codex or `.mcp.claude.json` for Claude Code, or the host's MCP config for manual registrations). The server does not load `.env` files. Full list with validation rules: [docs/advanced.md](docs/advanced.md#configuration-reference).
 
-## Host configuration (Codex)
+## Host configuration
+
+Jobs can run for many minutes, so host timeouts and tool wrapping decide whether `wait_task` is one cheap pending call or an expensive polling loop. The bridge reads the connected client's name and, for Codex and Claude Code, `runtime_info` reports likely misconfiguration under `host_warnings` (read-only; it never edits host files).
+
+### Codex
 
 Jobs can run for many minutes, so two Codex settings decide whether `wait_task` behaves as one cheap pending call or as an expensive polling loop.
 
@@ -150,6 +176,16 @@ Why they matter:
 `npm run register:codex` prints both settings after registering.
 
 To verify, run one job and check the host's event log: there should be a single `wait_task` call for the job and no `exec` wrapper around bridge calls. If the bridge sees a second `wait_task` for a job whose previous wait was cut short, its response includes a hint pointing back to this section.
+
+### Claude Code
+
+The defaults work: no timeout or tool-wrapping setting is needed.
+
+- Claude Code's default MCP tool timeout (about 28 hours) is far above a job budget. Only change it if you set `MCP_TOOL_TIMEOUT` or `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` yourself; keep both above `AGY_MAX_TURN_SECONDS` (default 1800) plus margin, because stdio servers also have an idle timeout (default 30 minutes). If either variable is set lower in the server's environment, `runtime_info` lists it under `host_warnings`.
+- While a wait is pending, the bridge sends an MCP progress notification about every 30 seconds when the host supplied a progress token, which keeps the connection active. It sends nothing otherwise.
+- Long MCP calls are moved to the background automatically and Claude Code notifies the session when they finish, so never poll `wait_task` or `inspect_task`.
+- The first run asks you to approve the plugin's MCP server.
+- The plugin declares its server in `.mcp.claude.json` using `${CLAUDE_PLUGIN_ROOT}`, because Claude Code starts plugin servers in your project directory rather than the plugin directory.
 
 ## Other MCP hosts
 
