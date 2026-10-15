@@ -19,6 +19,12 @@ function failure(error) {
 export const PROGRESS_KEEPALIVE_MS = 30_000;
 export function createServer(manager, options = {}) {
     const progressIntervalMs = options.progressIntervalMs ?? PROGRESS_KEEPALIVE_MS;
+    // The default "core" toolset does not register legacy/maintenance tools at all, so they cost no controller context.
+    const fullToolset = manager.getToolset() === "full";
+    const registerLegacy = (name, config, handler) => {
+        if (fullToolset)
+            server.registerTool(name, config, handler);
+    };
     const server = new TaskAwareServer({ name: "antigravity-mcp-bridge", version: "0.1.0" }, manager);
     const clientName = () => server.server.getClientVersion()?.name;
     /** Host configuration warnings, appended once per process to the first dispatch-like response. */
@@ -276,7 +282,7 @@ export function createServer(manager, options = {}) {
             return failure(error);
         }
     });
-    server.registerTool("delete_task", {
+    registerLegacy("delete_task", {
         title: "Delete Task History",
         description: "Delete a completed task run and its event history from disk. Fails if the task is currently active (queued or running).",
         inputSchema: z.object({
@@ -291,7 +297,7 @@ export function createServer(manager, options = {}) {
             return failure(error);
         }
     });
-    server.registerTool("clean_history", {
+    registerLegacy("clean_history", {
         title: "Clean Task History",
         description: "Prune or clean historical task runs by workspace/project, status, age, or keeping the newest N runs. Active tasks are automatically protected.",
         inputSchema: z.object({
@@ -362,7 +368,7 @@ export function createServer(manager, options = {}) {
         }
     });
     // --- Compatibility Tools ---
-    server.registerTool("agy_delegate", {
+    registerLegacy("agy_delegate", {
         title: "Delegate to Antigravity",
         description: "Send one bounded task to a persistent Antigravity implementer or tester conversation.",
         inputSchema: z.object({
@@ -383,7 +389,7 @@ export function createServer(manager, options = {}) {
             return failure(error);
         }
     });
-    server.registerTool("agy_status", {
+    registerLegacy("agy_status", {
         title: "Antigravity worker status",
         description: "Inspect compact legacy worker status. Stderr diagnostics are opt-in and bounded.",
         inputSchema: z.object({
@@ -398,7 +404,7 @@ export function createServer(manager, options = {}) {
         }));
         return success({ workers }, `${workers.length} legacy worker status record(s).`);
     });
-    server.registerTool("agy_stop", {
+    registerLegacy("agy_stop", {
         title: "Stop Antigravity workers",
         description: "Stop one role or both while retaining in-memory status metadata.",
         inputSchema: z.object({ role: optionalRoleSchema })
@@ -411,7 +417,7 @@ export function createServer(manager, options = {}) {
             return failure(error);
         }
     });
-    server.registerTool("agy_reset", {
+    registerLegacy("agy_reset", {
         title: "Reset Antigravity conversations",
         description: "Stop and forget one role or both. The next delegation starts a fresh conversation.",
         inputSchema: z.object({ role: optionalRoleSchema })

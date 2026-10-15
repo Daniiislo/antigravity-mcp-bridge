@@ -10,6 +10,7 @@ const fixture = path.join(root, "scripts", "fixtures", "fake-agy.mjs");
 const runsDir = mkdtempSync(path.join(tmpdir(), "agy-smoke-"));
 const env = Object.fromEntries(Object.entries(process.env).filter((entry) => entry[1] !== undefined));
 Object.assign(env, {
+  AGY_TOOLSET: "core",
   AGY_BIN: process.execPath,
   AGY_BASE_ARGS_JSON: JSON.stringify([fixture]),
   AGY_ALLOWED_ROOTS: root,
@@ -29,21 +30,15 @@ const client = new Client({ name: "antigravity-bridge-smoke", version: "0.1.0" }
 try {
   await client.connect(transport);
 
-  // 1. Verify all 15 tools are registered
+  // 1. Verify the core toolset is registered (legacy tools are hidden by default)
   const listed = await client.listTools();
   const names = listed.tools.map((tool) => tool.name).sort();
   const expected = [
-    "agy_delegate",
     "agy_events",
     "agy_history",
-    "agy_reset",
-    "agy_status",
-    "agy_stop",
     "cancel_task",
-    "clean_history",
     "close_worker",
     "create_worker",
-    "delete_task",
     "dispatch_task",
     "inspect_task",
     "list_models",
@@ -120,15 +115,6 @@ try {
     throw new Error(`close_worker failed: ${JSON.stringify(closeRes)}`);
   }
 
-  // 4. Compatibility tool: agy_delegate
-  const delegateRes = await client.callTool({
-    name: "agy_delegate",
-    arguments: { role: "implementer", task: "smoke", cwd: root, timeoutSeconds: 5 }
-  });
-  if (delegateRes.isError || delegateRes.structuredContent?.response !== "reply:smoke:accept-edits") {
-    throw new Error(`unexpected delegation result: ${JSON.stringify(delegateRes)}`);
-  }
-
   // 5. Dashboard tool: open_dashboard
   const dashRes = await client.callTool({
     name: "open_dashboard",
@@ -138,16 +124,39 @@ try {
     throw new Error(`open_dashboard failed: ${JSON.stringify(dashRes)}`);
   }
 
-  // 6. Delete task: delete_task
-  const delRes = await client.callTool({
-    name: "delete_task",
-    arguments: { job_id: jobId }
-  });
-  if (delRes.isError || !delRes.structuredContent?.success) {
-    throw new Error(`delete_task failed: ${JSON.stringify(delRes)}`);
+  if (runtime.structuredContent?.toolset !== "core") {
+    throw new Error(`expected core toolset, got ${runtime.structuredContent?.toolset}`);
   }
 
-  process.stdout.write("MCP smoke test passed: all 18 tools verified, runtime identity, async worker lifecycle (create/dispatch/single-wait/close), open_dashboard, and delete_task completed.\n");
+  // 6. Full toolset (opt-in): legacy tools agy_delegate and delete_task
+  const fullClient = new Client({ name: "antigravity-bridge-smoke-full", version: "0.1.0" });
+  const fullTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(root, "dist", "index.js")],
+    cwd: root,
+    env: { ...env, AGY_TOOLSET: "full" },
+    stderr: "pipe"
+  });
+  try {
+    await fullClient.connect(fullTransport);
+    const fullNames = (await fullClient.listTools()).tools.map((tool) => tool.name);
+    if (fullNames.length !== 18) throw new Error(`expected 18 tools in full toolset, got ${fullNames.length}`);
+    const delegateRes = await fullClient.callTool({
+      name: "agy_delegate",
+      arguments: { role: "implementer", task: "smoke", cwd: root, timeoutSeconds: 5 }
+    });
+    if (delegateRes.isError || delegateRes.structuredContent?.response !== "reply:smoke:accept-edits") {
+      throw new Error(`unexpected delegation result: ${JSON.stringify(delegateRes)}`);
+    }
+    const delRes = await fullClient.callTool({ name: "delete_task", arguments: { job_id: jobId } });
+    if (delRes.isError || !delRes.structuredContent?.success) {
+      throw new Error(`delete_task failed: ${JSON.stringify(delRes)}`);
+    }
+  } finally {
+    await fullClient.close();
+  }
+
+  process.stdout.write("MCP smoke test passed: 12 core tools verified, runtime identity, async worker lifecycle (create/dispatch/single-wait/close), open_dashboard, and the full toolset (agy_delegate, delete_task) completed.\n");
 } finally {
   await client.close();
   rmSync(runsDir, { recursive: true, force: true });

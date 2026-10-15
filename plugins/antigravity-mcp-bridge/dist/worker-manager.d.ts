@@ -184,8 +184,10 @@ export declare class WorkerManager {
         observed_token_budget: number | null;
         allowed_roots: string[];
         add_dirs: string[];
+        toolset: import("./config.js").Toolset;
         tasks_capability_gated: boolean;
     };
+    getToolset(): "core" | "full";
     /** Read-only host configuration warnings for the connected client (empty for unknown hosts). */
     getHostWarnings(clientName: string | undefined): string[];
     /** Host warnings the first time only, so the first dispatch-like response carries them once per process. */

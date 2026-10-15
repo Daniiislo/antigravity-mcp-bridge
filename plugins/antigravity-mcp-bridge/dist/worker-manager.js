@@ -64,6 +64,7 @@ export class WorkerManager {
         return this.modelCatalog.listModels(options);
     }
     getRuntimeInfo() { return runtimeInfo(this.config); }
+    getToolset() { return this.config.toolset ?? "core"; }
     /** Read-only host configuration warnings for the connected client (empty for unknown hosts). */
     getHostWarnings(clientName) {
         return hostWarnings({ clientName, budgetSeconds: (this.config.maxTurnTimeoutMs ?? 1_800_000) / 1_000 });

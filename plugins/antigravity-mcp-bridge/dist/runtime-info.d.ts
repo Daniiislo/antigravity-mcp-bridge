@@ -8,5 +8,6 @@ export declare function runtimeInfo(config: BridgeConfig): {
     observed_token_budget: number | null;
     allowed_roots: string[];
     add_dirs: string[];
+    toolset: import("./config.js").Toolset;
     tasks_capability_gated: boolean;
 };

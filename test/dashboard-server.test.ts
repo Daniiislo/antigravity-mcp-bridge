@@ -29,6 +29,7 @@ function makeManager(overrides: Partial<BridgeConfig> = {}) {
     defaultTimeoutMs: 5_000,
     maxStderrBytes: 4_096,
     dashboardEnabled: true,
+    toolset: "full",
     dashboardPort: 0,
     ...overrides
   };

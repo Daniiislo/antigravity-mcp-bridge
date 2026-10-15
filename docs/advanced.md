@@ -6,7 +6,7 @@ Deep-dive material for the Antigravity MCP Bridge — everything trimmed from th
 
 `dispatch_task` and `send_followup` also accept `wait: true`, which waits for the terminal result in the same call (aborting the call leaves the job running; a later `wait_task` works). While any wait is pending and the caller supplied a progress token, the server sends `notifications/progress` about every 30 seconds with the job status and last progress line (never in the tool result).
 
-`dispatch_task` and `send_followup` accept `total_duration_seconds`, measured from dispatch including queue time. It defaults to the effective maximum duration (1800 seconds with default configuration). Queued expiry does not start AGY; active expiry waits for confirmed process-tree cleanup before queue advancement. Set the host tool timeout above this total budget plus cleanup margin (see [Host configuration](../README.md#host-configuration-codex) for the Codex settings). The compatibility `agy_delegate` remains a direct turn and has no manager queue deadline.
+`dispatch_task` and `send_followup` accept `total_duration_seconds`, measured from dispatch including queue time. It defaults to the effective maximum duration (1800 seconds with default configuration). Queued expiry does not start AGY; active expiry waits for confirmed process-tree cleanup before queue advancement. Set the host tool timeout above this total budget plus cleanup margin (see [Host configuration](../README.md#host-configuration-codex) for the Codex settings). The compatibility `agy_delegate` (toolset `full` only) remains a direct turn and has no manager queue deadline.
 
 Near the deadline (45 seconds before the hard cap by default) the bridge sends a FINISH_NOW event asking the worker to wrap up. A result returned inside that grace window is a normal terminal handoff, not a failure — partial work is preserved instead of killed mid-write.
 
@@ -50,7 +50,7 @@ Testers are launched with `--mode plan`. Current `agy` prints `warning: --mode p
 - **Restart safety:** a persisted `queued` or `running` record cannot prove its child process survived a bridge restart. `wait_task` reports `ORPHANED_JOB` instead of pretending that record is terminal or dispatching duplicate work.
 - **Load diagnostics only when needed:** on failure, use `include_prompt: true` and/or `include_steps: true`; keep them false for successful tasks. Inspection reports `caller_payload_chars` (serialized structured payload before that field is added), a 32,768-character budget, and whether result/error truncation occurred. These are character measurements, not model-token estimates.
 - **Separate token domains:** `usage` is the per-turn Antigravity usage delta when the bridge has an uninterrupted counter baseline; it is intentionally omitted for the first success after a timeout or unobserved crash. `cumulative_usage` is the raw CLI conversation total. Neither is usage from the calling Codex/Claude controller. `duration_seconds` is bridge-observed wall time for the job; `cli_duration_seconds` preserves the raw CLI value.
-- **Keep legacy status compact:** `agy_status` omits stderr by default; request `include_diagnostics: true` only while diagnosing a failure.
+- **Keep legacy status compact:** (requires `toolset: full`) `agy_status` omits stderr by default; request `include_diagnostics: true` only while diagnosing a failure.
 
 ## Dashboard and history CLI
 
@@ -78,11 +78,12 @@ For offline diagnosis, run `node scripts/analyze-runs.mjs [runs-directory]` afte
 
 ## Configuration reference
 
-All configuration is environment variables except `allowed_roots` and `add_dirs`, which live in `~/.antigravity-bridge/config.json` (see the [README](../README.md#one-required-setting-allowed-workspace-roots)). The server does not automatically load `.env` files. See [`.env.example`](../.env.example) for a template.
+All configuration is environment variables except `allowed_roots`, `add_dirs` and `toolset` (which also accepts the env variable `AGY_TOOLSET`), which live in `~/.antigravity-bridge/config.json` (see the [README](../README.md#one-required-setting-allowed-workspace-roots)). The server does not automatically load `.env` files. See [`.env.example`](../.env.example) for a template.
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `AGY_ALLOWED_ROOTS` | config file → user home | Allowed workspace roots; separated by `;` on Windows and `:` on macOS/Linux. Overrides the config file. |
+| `AGY_TOOLSET` | config file `toolset` → `core` | `core` or `full`; an invalid value is a hard error. `core` does not register the legacy/maintenance tools `agy_delegate`, `agy_status`, `agy_stop`, `agy_reset`, `clean_history`, and `delete_task` (the compatibility `agy_delegate` and `agy_status` notes in this document apply only to `full`). Set `"toolset": "full"` in the per-user config file to opt in from a plugin install. Overrides the file. |
 | `AGY_WORKER_RULES` | `on` | When not `off`, every job prompt gets a short bridge contract before `[Task]`: read each needed file once, prefer targeted edits, run only needed commands, and end with a handoff of at most about 1,200 characters. `off` sends the brief (plus any constraints/budget) unchanged. |
 | `AGY_ADD_DIRS` | config file `add_dirs` → none | Extra directories passed to every worker as additional `--add-dir` flags, in addition to its workspace. Separated like `AGY_ALLOWED_ROOTS`; overrides the file. Each entry must be an existing directory and is canonicalized; a malformed `add_dirs` value is a hard error. Antigravity checks the literal path, so reference the real path: a symlink or junction alias of an added directory is still denied. |
 | `AGY_USER_CONFIG` | `~/.antigravity-bridge/config.json` | Path to the per-user config file. |

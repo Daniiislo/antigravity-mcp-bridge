@@ -243,6 +243,8 @@ export class WorkerManager {
 
   getRuntimeInfo() { return runtimeInfo(this.config); }
 
+  getToolset(): "core" | "full" { return this.config.toolset ?? "core"; }
+
   /** Read-only host configuration warnings for the connected client (empty for unknown hosts). */
   getHostWarnings(clientName: string | undefined): string[] {
     return hostWarnings({ clientName, budgetSeconds: (this.config.maxTurnTimeoutMs ?? 1_800_000) / 1_000 });

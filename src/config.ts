@@ -4,6 +4,7 @@ import path from "node:path";
 import { resolveAgyExecutable, type ResolveExecutableOptions } from "./resolve-executable.js";
 
 export type Role = "implementer" | "tester";
+export type Toolset = "core" | "full";
 
 export interface BridgeConfig {
   executable: string;
@@ -11,6 +12,8 @@ export interface BridgeConfig {
   allowedRoots: string[];
   /** Extra directories every worker may read in addition to its workspace (agy --add-dir). */
   addDirs?: string[];
+  /** "core" (default) hides the legacy/maintenance tools; "full" registers every tool. */
+  toolset?: Toolset;
   runsDir?: string;
   model?: string;
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
@@ -166,6 +169,7 @@ export function resolveUserConfigPath(
 export interface UserConfigFile {
   allowed_roots?: string[];
   add_dirs?: string[];
+  toolset?: string;
 }
 
 function readUserConfigFile(
@@ -185,6 +189,22 @@ function readUserConfigFile(
     throw new Error(`${file} must contain a JSON object`);
   }
   return { file, config: parsed as UserConfigFile };
+}
+
+function parseToolset(value: unknown, source: string): Toolset | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (value === "core" || value === "full") return value;
+  throw new Error(`${source} must be "core" or "full"`);
+}
+
+/** Read `toolset` from the per-user config file; an invalid value is a hard error. */
+export function readUserToolset(
+  env: NodeJS.ProcessEnv = process.env,
+  homeDirectory = homedir(),
+  reader: (file: string) => string = (file) => readFileSync(file, "utf8")
+): Toolset | undefined {
+  const loaded = readUserConfigFile(env, homeDirectory, reader);
+  return loaded ? parseToolset(loaded.config.toolset, `${loaded.file}: toolset`) : undefined;
 }
 
 function directoryList(value: unknown, file: string, key: string): string[] | undefined {
@@ -289,6 +309,10 @@ export function loadConfig(
     ?? readUserAddDirs(env, homeDirectory, options?.configReader)
     ?? [];
   const addDirs = [...new Set(configuredAddDirs.map((dir) => canonicalDirectory(dir, "add_dirs entry")))];
+  // Same precedence: AGY_TOOLSET env > config file > core.
+  const toolset: Toolset = parseToolset(env.AGY_TOOLSET?.trim(), "AGY_TOOLSET")
+    ?? readUserToolset(env, homeDirectory, options?.configReader)
+    ?? "core";
   const model = env.AGY_MODEL || undefined;
   const effort = optionalEffort(env.AGY_EFFORT);
   const agent = env.AGY_AGENT || undefined;
@@ -319,6 +343,7 @@ export function loadConfig(
     ...(baseArgs ? { baseArgs } : {}),
     allowedRoots,
     addDirs,
+    toolset,
     runsDir,
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
